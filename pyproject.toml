@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asqp-tree-cot-rt"
+version = "0.1.0"
+description = "Tree-CoT-RT reproduction pipeline for aspect sentiment quad prediction"
+requires-python = ">=3.10"
+dependencies = [
+    "accelerate>=1.0.0",
+    "peft>=0.13.0",
+    "torch>=2.2.0",
+    "transformers>=4.46.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+tree-cot-rt = "tree_cot_rt.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
