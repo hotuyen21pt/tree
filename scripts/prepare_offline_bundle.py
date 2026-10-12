@@ -5,7 +5,7 @@ Kaggle runs with no Internet, so the notebook needs one uploaded archive with
 everything in it:
 
   1. validate and copy the JSONL splits,
-  2. download the Linux/py3.11 wheels Kaggle is missing,
+  2. download the Linux wheels Kaggle is missing,
   3. zip project source + data + wheelhouse.
 
 Tree-CoT-RT has no dependency parser, so unlike S2IT there is no Stanza step
@@ -43,7 +43,7 @@ WHEELS = (
     "huggingface-hub==0.28.1",
     "safetensors==0.6.2",
 )
-KAGGLE_PYTHON = "3.11"
+KAGGLE_PYTHON = "3.12"  # Kaggle image Python; check a run log if it changes
 KAGGLE_PLATFORM = "manylinux2014_x86_64"
 
 PROJECT_FILES = ("pyproject.toml", "README.md")
