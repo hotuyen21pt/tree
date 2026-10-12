@@ -53,18 +53,25 @@ expand to 9,121 typed instances, and the method samples chains over all of
 them **twice** — once in S1-a to build the candidate pool, once in S2 to
 select from the optimised policy (Algorithm 3).
 
-Cost at `CHAINS_PER_TYPE = 2`, `MAX_NEW_TOKENS = 320` (~20 s per typed
-instance):
+### Pick the P100 accelerator, not T4
 
-| phase | GPU-hours |
-|---|---|
-| S1-a generation over 9,121 typed instances | ~51 |
-| S2 re-generation for offline selection | ~51 |
-| S4 full test split, 5 samples/sentence | ~29 |
-| **total** | **~131 h ≈ 15 sessions ≈ 4-5 weeks of Kaggle quota** |
+Generation is memory-bandwidth bound, and Kaggle's P100 has 732 GB/s against
+the T4's 320 GB/s — **2.3x faster for this workload**, for free. (For S2IT,
+which is dominated by fine-tuning rather than decoding, the T4's higher
+compute wins instead.)
 
-For comparison, the paper's own `K = 10` with 2,048-token chains would cost
-roughly 586 GPU-hours.
+### Sessions needed, evaluating the full 1,890-sentence test split
+
+| train sentences | P100, 384 tok | P100, 288 tok | T4, 384 tok |
+|---|---|---|---|
+| 8,815 (full) | 8.9 | 6.7 | 20.3 |
+| 2,934 (= Laptop-ACOS train) | 3.5 | 2.6 | 8.0 |
+| 1,530 (= Restaurant-ACOS train) | 2.2 | 1.7 | 5.1 |
+
+Those two reference rows matter: **1,530 and 2,934 are the actual training
+splits both papers use.** Training on ~2,900 sentences is not a reduced
+baseline, it is the scale these methods were designed and published at, and
+it finishes in 3 P100 sessions instead of 7.
 
 **How to run it:**
 
@@ -103,13 +110,20 @@ SAFETY_MARGIN_MINUTES     = 15
 # Full data. S1-a cannot cover it in one session, so the run is resumable:
 # see "Running full data across sessions" below. K and the chain length are
 # cut hard to buy coverage, which is the trade this scale forces.
+# Decoding is memory-bandwidth bound: every step reads all 14 GB of weights
+# whatever K or M is, and num_return_sequences batches the K chains into that
+# one read. So K and M are nearly FREE, and only the sentence count and
+# MAX_NEW_TOKENS actually buy wall-clock time. All three are therefore kept at
+# the paper's values.
 MAX_TRAIN_RECORDS = None   # full split (8,815 sentences -> 9,121 typed)
 MAX_TEST_RECORDS  = None   # full split (1,890 sentences)
-CHAINS_PER_TYPE   = 2      # paper: K = 10
-GROUP_SIZE        = 4      # paper: G = 10
-GRPO_STEPS        = 10     # paper: K = 10 GRPO steps
-INFERENCE_SAMPLES = 5      # paper: M = 5
-MAX_NEW_TOKENS    = 320    # paper: 2048
+CHAINS_PER_TYPE   = 10     # = paper K
+GROUP_SIZE        = 10     # = paper G
+GRPO_STEPS        = 10     # = paper
+INFERENCE_SAMPLES = 5      # = paper M
+# The paper's own IAIO example chain (Table 14) measures ~201 tokens, so 384
+# leaves ~90% headroom. 288 still fits it and cuts generation time by 25%.
+MAX_NEW_TOKENS    = 384    # paper: 2048, which that chain never needs
 
 # --- Fine-tuning -------------------------------------------------------------
 SELECTED_CHAINS_PER_TYPE = 2
