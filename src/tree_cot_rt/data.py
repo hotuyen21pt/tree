@@ -44,7 +44,8 @@ class Instance:
 
 
 def quad_type(aspect_implicit: bool, opinion_implicit: bool) -> str:
-    return ("I" if aspect_implicit else "E") + ("A" if opinion_implicit else "E")
+    """One of the four Tree-CoT-RT ASQP types: EAEO, EAIO, IAEO, IAIO."""
+    return ("IA" if aspect_implicit else "EA") + ("IO" if opinion_implicit else "EO")
 
 
 def _as_optional_text(value: Any, field: str, source: Path, line: int) -> str | None:

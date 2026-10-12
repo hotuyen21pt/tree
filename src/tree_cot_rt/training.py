@@ -13,9 +13,11 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
 )
 
+from .budget import Budget, Deadline
 from .data import Instance
 from .reasoning import (
     extract_reasoning,
@@ -25,7 +27,8 @@ from .reasoning import (
     reasoning_prompt,
     typed_instances,
 )
-from .rewards import group_advantages, score_chain
+from .rewards import REWARD_WEIGHTS, group_advantages, score_chain
+from .timing import format_duration
 
 
 def _dtype() -> torch.dtype:
@@ -69,6 +72,19 @@ def _prepare_for_training(model: Any, rank: int, alpha: int, dropout: float):
             ],
         ),
     )
+
+
+class _TimeBudgetCallback(TrainerCallback):
+    """Stops a fine-tuning stage at its deadline so the adapter is still saved."""
+
+    def __init__(self, deadline: Deadline) -> None:
+        self.deadline = deadline
+
+    def on_step_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        if self.deadline.expired():
+            control.should_training_stop = True
+            control.should_save = False
+        return control
 
 
 def _chat_text(tokenizer: Any, prompt: str) -> str:
@@ -150,6 +166,7 @@ def _fit_lora(
     gradient_accumulation: int,
     learning_rate: float,
     max_length: int,
+    deadline: Deadline | None = None,
 ):
     if not examples:
         raise ValueError(f"No valid fine-tuning examples for {output_dir.name}")
@@ -175,6 +192,7 @@ def _fit_lora(
         ),
         train_dataset=_PromptDataset(examples, tokenizer, max_length),
         data_collator=_CompletionCollator(tokenizer),
+        callbacks=[_TimeBudgetCallback(deadline)] if deadline is not None else None,
     )
     trainer.train()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -257,6 +275,7 @@ def _generation_stage(
     count: int,
     max_new_tokens: int,
     output_path: Path,
+    deadline: Deadline | None = None,
 ) -> list[dict[str, Any]]:
     cached = _read_candidates(output_path)
     cached_by_id = defaultdict(list)
@@ -264,7 +283,18 @@ def _generation_stage(
         cached_by_id[(row.get("instance_id"), row.get("quad_type"))].append(row)
     rows = []
     total = sum(1 for _ in _examples_for_typed(instances, categories))
+    covered = 0
     for index, (typed, prompt) in enumerate(_examples_for_typed(instances, categories), 1):
+        # Generating K chains for every typed instance is by far the most
+        # expensive phase. When the session budget runs out, keep what has been
+        # generated so far instead of losing the run; coverage is recorded.
+        if deadline is not None and deadline.expired():
+            print(
+                f"Stopped Tree-CoT generation at {index - 1}/{total} typed instances "
+                "to stay inside the session budget.",
+                flush=True,
+            )
+            break
         prior = [
             row
             for row in cached_by_id[(typed.instance_id, typed.quad_type)]
@@ -300,6 +330,7 @@ def _generation_stage(
                     }
                 )
         rows.extend(candidates[:count])
+        covered = index
         if index % 25 == 0 or index == total:
             _write_candidates(output_path, rows + cached)
             print(f"Generated Tree-CoT chains for {index}/{total} typed instances")
@@ -308,6 +339,7 @@ def _generation_stage(
         unique[(row["instance_id"], row["quad_type"], row["chain"])] = row
     result = list(unique.values())
     _write_candidates(output_path, result)
+    print(f"Tree-CoT chains: {len(result)} over {covered}/{total} typed instances")
     return result
 
 
@@ -328,6 +360,41 @@ def _sft_examples(candidates: list[dict[str, Any]], valid_only: bool) -> list[tu
             ensure_ascii=False,
         )
         examples.append((row["prompt"], target))
+    return examples
+
+
+def _final_examples(
+    selected: list[dict[str, Any]],
+    instances_by_id: dict[str, Instance],
+    categories: list[str],
+) -> list[tuple[str, str]]:
+    """S3 supervision: (sentence, selected reasoning chain, gold quadruples).
+
+    The paper's Step 3 training instance carries no ASQP type, because Step 4
+    has to predict without one. The per-type chains selected in Step 2 are
+    merged back into a single example per sentence targeting all its quads.
+    """
+    by_instance: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in selected:
+        by_instance[str(row.get("instance_id"))].append(row)
+    examples: list[tuple[str, str]] = []
+    for instance_id, rows in by_instance.items():
+        instance = instances_by_id.get(instance_id)
+        if instance is None:
+            continue
+        reasoning = " ".join(
+            extract_reasoning(row.get("chain", "")) for row in rows
+        ).strip()
+        if not reasoning:
+            continue
+        target = json.dumps(
+            {
+                "reasoning": reasoning,
+                "quadruples": [quad.as_dict() for quad in instance.quads],
+            },
+            ensure_ascii=False,
+        )
+        examples.append((reasoning_prompt(instance.text, None, categories), target))
     return examples
 
 
@@ -381,19 +448,19 @@ def _sequence_log_probability_with_grad(
     return result
 
 
-def _grpo_update(
+def _grpo_accumulate(
     model,
     tokenizer,
-    instance: Instance,
     prompt: str,
     completions: list[str],
     rewards: list[float],
-    optimizer,
     *,
     clip_epsilon: float,
     kl_coefficient: float,
     max_length: int,
+    scale: float = 1.0,
 ):
+    """One GRPO group: backward only, so the caller controls accumulation."""
     old_logps = [
         _sequence_log_probability(model, tokenizer, prompt, text, max_length).detach()
         for text in completions
@@ -436,21 +503,17 @@ def _grpo_update(
             1.0 - clip_epsilon,
             1.0 + clip_epsilon,
         ) * advantages[index]
+        # Eq. 7: the k3 forward-KL estimator, pi_ref/pi - log(pi_ref/pi) - 1.
+        log_ratio_reference = ref_logps[index] - new_logp
+        kl = torch.exp(log_ratio_reference) - log_ratio_reference - 1.0
         loss = (
-            -torch.minimum(unclipped, clipped)
-            + kl_coefficient * (new_logp - ref_logps[index])
+            -torch.minimum(unclipped, clipped) + kl_coefficient * kl
         ) / len(completions)
         # Log-probabilities are token vectors; reduce each completion's
         # token-level objective to a scalar before backward().
-        loss = loss.mean()
+        loss = loss.mean() * scale
         loss.backward()
         losses.append(float(loss.detach().cpu()))
-    torch.nn.utils.clip_grad_norm_(
-        [parameter for parameter in model.parameters() if parameter.requires_grad],
-        1.0,
-    )
-    optimizer.step()
-    optimizer.zero_grad(set_to_none=True)
     return sum(losses)
 
 
@@ -463,6 +526,10 @@ def train(
     final_model_name: str = "Qwen/Qwen2.5-7B",
     chains_per_type: int = 10,
     grpo_steps: int = 10,
+    group_size: int = 10,
+    grpo_batch_size: int = 2,
+    clip_epsilon: float = 0.2,
+    kl_coefficient: float = 0.01,
     selected_chains_per_type: int = 2,
     final_steps: int = 10,
     batch_size: int = 4,
@@ -471,11 +538,31 @@ def train(
     max_length: int = 2048,
     max_new_tokens: int = 1024,
     seed: int = 444,
+    time_budget_seconds: float | None = None,
+    stage_fractions: tuple[float, float, float, float] = (0.40, 0.10, 0.30, 0.20),
 ) -> dict[str, Any]:
+    """Run S1-a, S1-b, S2 and S3 inside an optional wall-clock budget.
+
+    `stage_fractions` splits `time_budget_seconds` across the four phases.
+    S1-a gets the largest share because sampling K chains per typed instance
+    dominates the cost, and it degrades gracefully: whatever is generated
+    before the deadline becomes the candidate pool.
+    """
     if not train_instances or not dev_instances:
         raise ValueError("Both train and development splits must contain records")
     random.seed(seed)
     torch.manual_seed(seed)
+    budget = Budget(time_budget_seconds)
+    if not budget.unlimited:
+        print(f"Session budget: {format_duration(time_budget_seconds)}", flush=True)
+
+    def phase_deadline(index: int, name: str) -> Deadline | None:
+        if budget.unlimited:
+            return None
+        share = stage_fractions[index] / sum(stage_fractions[index:])
+        deadline = Deadline(budget, budget.remaining() * share, name)
+        print(f"[budget] {deadline.describe()}", flush=True)
+        return deadline
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     categories = sorted(
@@ -499,6 +586,7 @@ def train(
         count=chains_per_type,
         max_new_tokens=max_new_tokens,
         output_path=output / "stage1_candidates.jsonl",
+        deadline=phase_deadline(0, "S1a_generation"),
     )
     times["S1a_generation"] = time.perf_counter() - started
 
@@ -530,6 +618,7 @@ def train(
         gradient_accumulation=gradient_accumulation,
         learning_rate=learning_rate,
         max_length=max_length,
+        deadline=phase_deadline(1, "S1b_tsft"),
     )
     times["S1b_tsft"] = time.perf_counter() - started
     del tSFT_model, generator
@@ -560,36 +649,73 @@ def train(
         for typed in typed_instances(row)
     ]
     rng = random.Random(seed)
+    # R_div (Eq. 11) measures dissimilarity against the Step-1 template chains.
+    templates_by_key: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for row in initial_candidates:
+        templates_by_key[(str(row.get("instance_id")), str(row.get("quad_type")))].append(
+            row.get("chain", "")
+        )
     rl_losses = []
+    # Table 8: batch size 2 with gradient accumulation 2, i.e. four prompts per
+    # optimiser step rather than one.
+    prompts_per_step = max(1, grpo_batch_size) * max(1, gradient_accumulation)
+    s2_deadline = phase_deadline(2, "S2_grpo")
+    # Half of S2 is reserved for re-sampling and scoring the selected chains.
+    grpo_deadline = (
+        None if s2_deadline is None else Deadline(budget, s2_deadline.remaining() * 0.5, "S2_grpo_updates")
+    )
     for step in range(grpo_steps):
-        typed, prompt = rng.choice(typed_training)
-        completions = _generate(
-            policy_model,
-            tokenizer,
-            prompt,
-            count=10,
-            max_new_tokens=max_new_tokens,
-            temperature=0.7,
-            top_p=0.95,
-        )
-        rewards = [
-            score_chain(text, typed, completions)["total"]
-            for text in completions
-        ]
-        loss = _grpo_update(
-            policy_model,
-            tokenizer,
-            typed,
-            prompt,
-            completions,
-            rewards,
-            optimizer,
-            clip_epsilon=0.2,
-            kl_coefficient=0.01,
-            max_length=max_length,
-        )
+        if grpo_deadline is not None and grpo_deadline.expired():
+            print(f"Stopped GRPO after {step}/{grpo_steps} steps to stay inside the budget.")
+            break
+        step_losses = []
+        best_reward = 0.0
+        optimizer.zero_grad(set_to_none=True)
+        for _ in range(prompts_per_step):
+            typed, prompt = rng.choice(typed_training)
+            completions = _generate(
+                policy_model,
+                tokenizer,
+                prompt,
+                count=group_size,
+                max_new_tokens=max_new_tokens,
+                temperature=0.7,
+                top_p=0.95,
+            )
+            templates = templates_by_key.get((typed.instance_id, typed.quad_type), [])
+            rewards = [
+                score_chain(text, typed, templates)["total"] for text in completions
+            ]
+            best_reward = max(best_reward, max(rewards))
+            step_losses.append(
+                _grpo_accumulate(
+                    policy_model,
+                    tokenizer,
+                    prompt,
+                    completions,
+                    rewards,
+                    clip_epsilon=clip_epsilon,
+                    kl_coefficient=kl_coefficient,
+                    max_length=max_length,
+                    scale=1.0 / prompts_per_step,
+                )
+            )
+        loss = sum(step_losses)
+        # Every group can be degenerate (identical rewards give zero advantage),
+        # and AdamW would still apply weight decay to a step with no gradient.
+        if any(step_losses):
+            torch.nn.utils.clip_grad_norm_(
+                [
+                    parameter
+                    for parameter in policy_model.parameters()
+                    if parameter.requires_grad
+                ],
+                1.0,
+            )
+            optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
         rl_losses.append(loss)
-        print(f"GRPO step {step + 1}/{grpo_steps}: loss={loss:.4f}, best_reward={max(rewards):.3f}")
+        print(f"GRPO step {step + 1}/{grpo_steps}: loss={loss:.4f}, best_reward={best_reward:.3f}")
 
     policy_candidates = _generation_stage(
         policy_model,
@@ -600,6 +726,7 @@ def train(
         count=chains_per_type,
         max_new_tokens=max_new_tokens,
         output_path=output / "stage2_policy_candidates.jsonl",
+        deadline=s2_deadline,
     )
     grouped_candidates = defaultdict(list)
     typed_lookup = {
@@ -615,12 +742,12 @@ def train(
     selected = []
     for (instance_id, type_name), candidates in grouped_candidates.items():
         typed = typed_lookup[(instance_id, type_name)]
-        group = [row.get("chain", "") for row in candidates]
+        templates = templates_by_key.get((instance_id, type_name), [])
         for candidate in candidates:
             candidate["_reward"] = score_chain(
                 candidate.get("chain", ""),
                 typed,
-                group,
+                templates,
             )["total"]
         valid = [row for row in candidates if row.get("valid")]
         selected.extend(
@@ -646,7 +773,16 @@ def train(
     started = time.perf_counter()
     final_tokenizer = _load_tokenizer(final_model_name)
     final_base = _load_base(final_model_name)
-    final_examples = _sft_examples(selected, valid_only=False)
+    final_examples = _final_examples(
+        selected,
+        {instance.instance_id: instance for instance in train_instances},
+        categories,
+    )
+    if not final_examples:
+        raise ValueError(
+            "No Step 3 training examples were built from the selected chains; "
+            "inspect stage2_selected_chains.jsonl."
+        )
     final_dir = output / "final"
     final_model = _fit_lora(
         final_base,
@@ -661,6 +797,7 @@ def train(
         gradient_accumulation=gradient_accumulation,
         learning_rate=learning_rate,
         max_length=max_length,
+        deadline=phase_deadline(3, "S3_final_sft"),
     )
     final_model.save_pretrained(final_dir)
     final_tokenizer.save_pretrained(final_dir)
@@ -680,7 +817,17 @@ def train(
         "tree_types": sorted({typed.quad_type for row in train_instances for typed in typed_instances(row)}),
         "generated_chains": len(initial_candidates),
         "selected_chains": len(selected),
+        "budget": budget.report(),
         "grpo_losses": rl_losses,
+        "grpo": {
+            "group_size": group_size,
+            "steps": grpo_steps,
+            "batch_size": grpo_batch_size,
+            "gradient_accumulation": gradient_accumulation,
+            "clip_epsilon": clip_epsilon,
+            "kl_coefficient": kl_coefficient,
+            "reward_weights": dict(REWARD_WEIGHTS),
+        },
         "stage_seconds": times,
         "training_seconds": sum(times.values()),
         "total_elapsed_seconds": time.perf_counter() - run_started,
@@ -707,7 +854,14 @@ def predict(
     base_model: str,
     samples: int = 5,
     max_new_tokens: int = 1024,
+    time_budget_seconds: float | None = None,
 ) -> list[dict[str, Any]]:
+    """S4 self-consistent prediction, optionally capped by a wall clock.
+
+    Sentences left unprocessed when the budget runs out are returned with an
+    empty quadruple list, so evaluation still covers the whole test split and
+    the recall penalty is visible rather than hidden.
+    """
     adapter = Path(adapter_dir)
     if not adapter.is_dir():
         raise FileNotFoundError(f"Trained adapter not found: {adapter}")
@@ -716,43 +870,45 @@ def predict(
     categories = json.loads(categories_path.read_text(encoding="utf-8"))
     model = PeftModel.from_pretrained(_load_base(base_model), adapter)
     model.eval()
-    by_id = {instance.instance_id: instance for instance in instances}
-    predictions: dict[str, dict[str, list[str]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
-    for instance in instances:
-        typed_rows = [
-            (quad_type, reasoning_prompt(instance.text, quad_type, categories))
-            for quad_type in ("EE", "EA", "IE", "IA")
-        ]
-        for quad_type, prompt in typed_rows:
-            outputs = _generate(
-                model,
-                tokenizer,
-                prompt,
-                count=samples,
-                max_new_tokens=max_new_tokens,
-                temperature=0.7,
-                top_p=0.95,
+    # S4 (Sec. 3.6): the gold ASQP type is unknown at test time, so the model is
+    # prompted once per sentence, samples M chains by stochastic decoding, and
+    # the quadruples are decided by self-consistent majority voting (Eq. 9).
+    rows: list[dict[str, Any]] = []
+    total = len(instances)
+    budget = Budget(time_budget_seconds)
+    deadline = Deadline(budget, None, "S4_inference")
+    skipped = 0
+    for index, instance in enumerate(instances, start=1):
+        if deadline.expired():
+            skipped = total - index + 1
+            rows.extend(
+                {
+                    "instance_id": row.instance_id,
+                    "text": row.text,
+                    "quadruples": [],
+                    "reasoning_samples": [],
+                }
+                for row in instances[index - 1 :]
             )
-            predictions[instance.instance_id][quad_type].extend(outputs)
-    return [
-        {
-            "instance_id": instance_id,
-            "text": by_id[instance_id].text,
-            "quadruples": [
-                quad
-                for quad_type, samples_for_type in predictions[instance_id].items()
-                for quad in majority_vote(
-                    samples_for_type,
-                    expected_type=quad_type,
-                )
-            ],
-            "reasoning_samples": [
-                sample
-                for samples_for_type in predictions[instance_id].values()
-                for sample in samples_for_type
-            ],
-        }
-        for instance_id in by_id
-    ]
+            print(f"Inference budget reached; {skipped}/{total} sentences left unscored.")
+            break
+        outputs = _generate(
+            model,
+            tokenizer,
+            reasoning_prompt(instance.text, None, categories),
+            count=samples,
+            max_new_tokens=max_new_tokens,
+            temperature=0.7,
+            top_p=0.95,
+        )
+        rows.append(
+            {
+                "instance_id": instance.instance_id,
+                "text": instance.text,
+                "quadruples": majority_vote(outputs),
+                "reasoning_samples": outputs,
+            }
+        )
+        if index % 25 == 0 or index == total:
+            print(f"Predicted {index}/{total} sentences")
+    return rows

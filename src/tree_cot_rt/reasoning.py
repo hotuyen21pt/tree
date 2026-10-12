@@ -7,22 +7,58 @@ from typing import Any
 
 from .data import Instance, Quad, quad_type
 
+# Tree-CoT-RT Table 1 / Figure 4: one type-specific reasoning path per ASQP type.
+# The order of the steps IS the method, so each path below follows the paper's
+# "Reasoning Path Summary" column exactly.
 TREE_PATHS = {
-    "EE": (
-        "Identify the explicit aspect and opinion together; infer their sentiment; "
-        "then assign the aspect category."
+    # EAEO: Identify A+O -> Pair -> Sentiment, Category
+    "EAEO": (
+        "Identify the explicit aspect; identify the explicit opinion; pair them; "
+        "derive the sentiment of that pair; then derive the aspect category."
     ),
-    "EA": (
-        "Identify the explicit aspect and sentiment-bearing context; assign the category; "
-        "then infer the implicit opinion and its polarity from the sentence."
+    # EAIO: A -> Infer O -> Sentiment, Category
+    "EAIO": (
+        "Identify the explicit aspect; infer the implicit opinion from the described "
+        "events or outcomes; then derive the sentiment and the aspect category."
     ),
-    "IE": (
-        "Identify the explicit opinion and sentiment; infer the implicit aspect from its "
-        "target and context; then assign the aspect category."
+    # IAEO: O -> Infer A -> Sentiment, Category
+    "IAEO": (
+        "Identify the explicit opinion; infer the implicit aspect that the opinion "
+        "targets; then derive the sentiment and the aspect category of that aspect."
     ),
-    "IA": (
-        "Use the full sentence context to infer the implicit aspect and implicit opinion; "
-        "then determine the sentiment and aspect category, citing textual evidence."
+    # IAIO: Context -> Infer IA + IO -> Sentiment, Category
+    "IAIO": (
+        "Read the full sentence context; infer both the implicit aspect and the "
+        "implicit opinion from the described events; then derive the sentiment and "
+        "the aspect category."
+    ),
+}
+
+#: Steps the rule-based validity checker expects per type, mirroring Table 1.
+TREE_STEPS = {
+    "EAEO": (
+        "Explicit Aspect Identification",
+        "Explicit Opinion Identification",
+        "Sentiment Derivation",
+        "Category Derivation",
+    ),
+    "EAIO": (
+        "Explicit Aspect Identification",
+        "Implicit Opinion Inference",
+        "Sentiment Derivation",
+        "Category Derivation",
+    ),
+    "IAEO": (
+        "Explicit Opinion Identification",
+        "Implicit Aspect Inference",
+        "Sentiment Derivation",
+        "Category Derivation",
+    ),
+    "IAIO": (
+        "Contextual Understanding",
+        "Implicit Aspect and Opinion Inference",
+        "Sentiment Derivation",
+        "Category Derivation",
     ),
 }
 
@@ -33,22 +69,69 @@ QUAD_SCHEMA = (
 )
 
 
-def reasoning_prompt(text: str, quad_type: str, categories: list[str] | None = None) -> str:
-    if quad_type not in TREE_PATHS:
+def aspect_is_implicit(type_name: str) -> bool:
+    return type_name.startswith("IA")
+
+
+def opinion_is_implicit(type_name: str) -> bool:
+    return type_name.endswith("IO")
+
+
+def _type_header(type_name: str) -> str:
+    return (
+        f"Tree type: {type_name} (aspect is "
+        f"{'implicit' if aspect_is_implicit(type_name) else 'explicit'}; opinion is "
+        f"{'implicit' if opinion_is_implicit(type_name) else 'explicit'}).\n"
+        f"Reasoning path: {TREE_PATHS[type_name]}\n"
+    )
+
+
+_TASK_HEADER = (
+    "Task: predict all aspect-category-opinion-sentiment quadruples (ASQP) in the "
+    "sentence. Analyze only the supplied sentence. Use null for an implicit aspect "
+    "or opinion, preserve exact text spans for explicit terms, and do not invent "
+    "evidence.\n"
+)
+
+_ALL_TYPES_HINT = (
+    "Decide for yourself which of the four ASQP types each quadruple belongs to and "
+    "follow that type's reasoning path:\n"
+    + "".join(f"- {name}: {path}\n" for name, path in TREE_PATHS.items())
+)
+
+
+def reasoning_prompt(
+    text: str,
+    quad_type: str | None = None,
+    categories: list[str] | None = None,
+) -> str:
+    """Tree-CoT prompt.
+
+    `quad_type` selects one type-specific tree, used in S1 chain generation and
+    S2 GRPO. Passing `None` gives the type-agnostic prompt of S3/S4, where the
+    gold type is unknown and the model must choose the path itself.
+    """
+    if quad_type is not None and quad_type not in TREE_PATHS:
         raise ValueError(f"Unknown ASQP type {quad_type!r}; expected one of {sorted(TREE_PATHS)}")
     labels = f"\nAllowed aspect categories: {json.dumps(categories, ensure_ascii=False)}" if categories else ""
+    if quad_type is None:
+        guidance = _ALL_TYPES_HINT
+        step_instruction = (
+            "Write reasoning as explicit ordered steps named Step 1, Step 2, Step 3 and "
+            "Step 4, covering every quadruple you report."
+        )
+    else:
+        guidance = _type_header(quad_type)
+        step_instruction = (
+            "Write reasoning as explicit ordered steps named Step 1, Step 2, Step 3 and "
+            "Step 4."
+        )
     return (
-        "Task: predict all aspect-category-opinion-sentiment quadruples (ASQP) in the "
-        "sentence. Analyze only the supplied sentence. Use null for an implicit aspect "
-        "or opinion, preserve exact text spans for explicit terms, and do not invent "
-        "evidence.\n"
-        f"Tree type: {quad_type} (aspect is {'implicit' if quad_type[0] == 'I' else 'explicit'}; "
-        f"opinion is {'implicit' if quad_type[1] == 'A' else 'explicit'}).\n"
-        f"Reasoning path: {TREE_PATHS[quad_type]}\n"
-        f"Sentence: {text}{labels}\n"
-        "Write reasoning as explicit ordered steps named Step 1, Step 2, and Step 3"
-        + (" and Step 4" if quad_type != "EE" else "")
-        + ". Follow the supplied path exactly, cite words or events from the sentence, "
+        _TASK_HEADER
+        + guidance
+        + f"Sentence: {text}{labels}\n"
+        + step_instruction
+        + " Follow the supplied path exactly, cite words or events from the sentence, "
         "and explain rather than repeat the answer. Return one JSON object only, with a "
         "reasoning field and a quadruples list "
         f"using this schema: {QUAD_SCHEMA}"
@@ -120,46 +203,64 @@ def parse_quads(text: str) -> list[dict[str, str | None]] | None:
     return result
 
 
-def chain_is_valid(text: str, quad_type: str) -> bool:
-    parsed = parse_quads(text)
-    obj = _json_object(text)
-    if (
-        parsed is None
-        or obj is None
-        or not isinstance(obj.get("reasoning"), str)
-        or not obj["reasoning"].strip()
-    ):
-        return False
-    reasoning = obj["reasoning"].casefold()
-    step_count = 3 if quad_type == "EE" else 4
-    # Some instruction-tuned models ignore the requested `Step 1:` labels but
-    # still return useful, type-correct reasoning. Accept that free-form text.
-    # If the model does use numbered step labels, require the complete ordered
-    # sequence so malformed Tree-CoT is still rejected.
-    step_positions = []
+def _step_positions(reasoning: str, step_count: int) -> list[int | None]:
+    positions: list[int | None] = []
     for number in range(1, step_count + 1):
         match = re.search(
             rf"(?:^|\s)(?:\*\*)?(?:step\s*)?{number}\s*[).:：\-–—]\s*",
             reasoning,
         )
-        step_positions.append(match.start() if match else None)
-    if any(position is not None for position in step_positions):
-        if any(position is None for position in step_positions):
-            return False
-        ordered_positions = [position for position in step_positions if position is not None]
-        if ordered_positions != sorted(ordered_positions):
-            return False
-    quad_sentiments = {}
+        positions.append(match.start() if match else None)
+    return positions
+
+
+def path_constraints(text: str, quad_type: str) -> list[bool]:
+    """Rule-based Tree-CoT path checker behind R_valid (Appendix C.1).
+
+    Returns one flag per constraint: (i) required step coverage, (ii) allowable
+    step order for the type, (iii) absence of contradictions. `R_valid` is the
+    normalised count of satisfied constraints, so the caller gets partial credit
+    for a chain that is structurally close but not perfect.
+    """
+    parsed = parse_quads(text)
+    obj = _json_object(text)
+    reasoning = ""
+    if obj is not None and isinstance(obj.get("reasoning"), str):
+        reasoning = obj["reasoning"]
+    if parsed is None or not reasoning.strip():
+        return [False, False, False]
+
+    folded = reasoning.casefold()
+    step_count = len(TREE_STEPS[quad_type])
+    positions = _step_positions(folded, step_count)
+    labelled = [position for position in positions if position is not None]
+    # Some instruction-tuned models drop the `Step 1:` labels but still produce
+    # type-correct reasoning; that counts as covered, only partial labelling does not.
+    coverage = not labelled or len(labelled) == step_count
+    order = labelled == sorted(labelled)
+
+    sentiments: dict[tuple[str | None, str, str | None], str] = {}
+    contradiction = False
     for quad in parsed:
         key = (quad["aspect_term"], quad["aspect_category"], quad["opinion_term"])
-        if key in quad_sentiments and quad_sentiments[key] != quad["sentiment"]:
-            return False
-        quad_sentiments[key] = quad["sentiment"]
-    return all(
-        (quad["aspect_term"] is None) == (quad_type[0] == "I")
-        and (quad["opinion_term"] is None) == (quad_type[1] == "A")
-        for quad in parsed
-    )
+        if key in sentiments and sentiments[key] != quad["sentiment"]:
+            contradiction = True
+            break
+        sentiments[key] = quad["sentiment"]
+    return [coverage, order, not contradiction]
+
+
+def type_matches(quad: dict[str, str | None], quad_type: str) -> bool:
+    return (quad["aspect_term"] is None) == aspect_is_implicit(quad_type) and (
+        quad["opinion_term"] is None
+    ) == opinion_is_implicit(quad_type)
+
+
+def chain_is_valid(text: str, quad_type: str) -> bool:
+    parsed = parse_quads(text)
+    if parsed is None or not all(path_constraints(text, quad_type)):
+        return False
+    return all(type_matches(quad, quad_type) for quad in parsed)
 
 
 def majority_vote(
@@ -167,6 +268,7 @@ def majority_vote(
     *,
     expected_type: str | None = None,
 ) -> list[dict[str, str | None]]:
+    """S4 self-consistency (Eq. 9): keep the quadruples most samples agree on."""
     counts: Counter[tuple[str | None, str | None, str | None, str | None]] = Counter()
     examples: dict[tuple[str | None, str | None, str | None, str | None], dict[str, str | None]] = {}
     valid_sample_count = 0
@@ -177,10 +279,7 @@ def majority_vote(
         sample_keys = set()
         has_expected_type = False
         for quad in parsed:
-            if expected_type and (
-                (quad["aspect_term"] is None) != (expected_type[0] == "I")
-                or (quad["opinion_term"] is None) != (expected_type[1] == "A")
-            ):
+            if expected_type and not type_matches(quad, expected_type):
                 continue
             has_expected_type = True
             key = (
@@ -207,12 +306,17 @@ def quads_from_instance(instance: Instance) -> list[dict[str, str | None]]:
 
 
 def typed_instances(instance: Instance) -> list[Instance]:
+    """Split a sentence into one sub-instance per ASQP type it contains.
+
+    S1 and S2 are type-specific, so a sentence carrying both an EAEO and an IAIO
+    quadruple contributes one Tree-CoT chain per type.
+    """
     result = []
-    for quad_type_name in TREE_PATHS:
+    for type_name in TREE_PATHS:
         quads = tuple(
             quad
             for quad in instance.quads
-            if quad_type(quad.aspect_implicit, quad.opinion_implicit) == quad_type_name
+            if quad_type(quad.aspect_implicit, quad.opinion_implicit) == type_name
         )
         if quads:
             result.append(
@@ -220,8 +324,8 @@ def typed_instances(instance: Instance) -> list[Instance]:
                     instance.instance_id,
                     instance.text,
                     quads,
-                    quad_type_name[0] == "I",
-                    quad_type_name[1] == "A",
+                    aspect_is_implicit(type_name),
+                    opinion_is_implicit(type_name),
                 )
             )
     return result

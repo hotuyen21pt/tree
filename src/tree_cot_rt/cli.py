@@ -68,6 +68,10 @@ def _train(args: argparse.Namespace) -> None:
         final_model_name=args.final_model,
         chains_per_type=args.chains_per_type,
         grpo_steps=args.grpo_steps,
+        group_size=args.group_size,
+        grpo_batch_size=args.grpo_batch_size,
+        clip_epsilon=args.clip_epsilon,
+        kl_coefficient=args.kl_coefficient,
         selected_chains_per_type=args.selected_chains_per_type,
         final_steps=args.final_steps,
         batch_size=args.batch_size,
@@ -140,13 +144,17 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--output-dir", default="runs/tree_cot_rt")
     train_parser.add_argument("--chains-per-type", type=int, default=10)
     train_parser.add_argument("--grpo-steps", type=int, default=10)
+    train_parser.add_argument("--group-size", type=int, default=10, help="GRPO group size G")
+    train_parser.add_argument("--grpo-batch-size", type=int, default=2)
+    train_parser.add_argument("--clip-epsilon", type=float, default=0.2)
+    train_parser.add_argument("--kl-coefficient", type=float, default=0.01)
     train_parser.add_argument("--selected-chains-per-type", type=int, default=2)
     train_parser.add_argument("--final-steps", type=int, default=10)
     train_parser.add_argument("--batch-size", type=int, default=4)
     train_parser.add_argument("--gradient-accumulation", type=int, default=2)
     train_parser.add_argument("--learning-rate", type=float, default=5e-5)
     train_parser.add_argument("--max-length", type=int, default=2048)
-    train_parser.add_argument("--max-new-tokens", type=int, default=2048)
+    train_parser.add_argument("--max-new-tokens", type=int, default=1024)
     train_parser.add_argument("--seed", type=int, default=444)
     train_parser.set_defaults(func=_train)
 
@@ -155,8 +163,10 @@ def build_parser() -> argparse.ArgumentParser:
     predict_parser.add_argument("--adapter-dir", required=True)
     predict_parser.add_argument("--base-model", default="Qwen/Qwen2.5-7B")
     predict_parser.add_argument("--output", required=True)
-    predict_parser.add_argument("--samples", type=int, default=5)
-    predict_parser.add_argument("--max-new-tokens", type=int, default=2048)
+    predict_parser.add_argument(
+        "--samples", type=int, default=5, help="self-consistency samples M (Sec. 3.6)"
+    )
+    predict_parser.add_argument("--max-new-tokens", type=int, default=1024)
     predict_parser.set_defaults(func=_predict)
 
     evaluate_parser = commands.add_parser("evaluate", help="compute exact quadruple micro-F1")
