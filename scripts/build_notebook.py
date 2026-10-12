@@ -114,7 +114,20 @@ Each session reports a projection of how many more are needed.
 
 code(r'''
 # ============================== SESSION CONFIG ==============================
+import sys
 import time
+
+# Kaggle runs this notebook under papermill, which redirects stdout to a file.
+# Python then block-buffers it, so nothing reaches the log until 8 KB has
+# accumulated - a run can look dead for a quarter of an hour while it is
+# unpacking, installing and loading a 7B model. Line buffering makes progress
+# visible as it happens.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+
 SESSION_START = time.perf_counter()
 
 # --- Wall-clock budget -------------------------------------------------------

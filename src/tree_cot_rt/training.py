@@ -289,6 +289,13 @@ def _load_tokenizer(model_name: str):
 
 
 def _load_base(model_name: str):
+    started = time.perf_counter()
+    print(f"Loading {model_name}", flush=True)
+    print(
+        "  Reading ~15 GB of weights from the Kaggle input mount; this is the "
+        "longest step with no output, often several minutes.",
+        flush=True,
+    )
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         device_map=_auto_device_map(),
@@ -296,6 +303,7 @@ def _load_base(model_name: str):
         **_dtype_kwargs(_dtype()),
     )
     assert_not_offloaded(model)
+    print(f"  loaded in {format_duration(time.perf_counter() - started)}", flush=True)
     model.config.use_cache = False
     return model
 
