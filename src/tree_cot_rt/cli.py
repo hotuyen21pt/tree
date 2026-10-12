@@ -70,6 +70,7 @@ def _train(args: argparse.Namespace) -> None:
         grpo_steps=args.grpo_steps,
         group_size=args.group_size,
         grpo_batch_size=args.grpo_batch_size,
+        grpo_gradient_accumulation=args.grpo_gradient_accumulation,
         clip_epsilon=args.clip_epsilon,
         kl_coefficient=args.kl_coefficient,
         selected_chains_per_type=args.selected_chains_per_type,
@@ -146,6 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--grpo-steps", type=int, default=10)
     train_parser.add_argument("--group-size", type=int, default=10, help="GRPO group size G")
     train_parser.add_argument("--grpo-batch-size", type=int, default=2)
+    train_parser.add_argument("--grpo-gradient-accumulation", type=int, default=2)
     train_parser.add_argument("--clip-epsilon", type=float, default=0.2)
     train_parser.add_argument("--kl-coefficient", type=float, default=0.01)
     train_parser.add_argument("--selected-chains-per-type", type=int, default=2)

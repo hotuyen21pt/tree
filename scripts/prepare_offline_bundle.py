@@ -91,6 +91,76 @@ def copy_data(data_dir: Path, bundle: Path) -> dict[str, int]:
     return sizes
 
 
+def select_subset(
+    bundle: Path,
+    sample_train: int | None,
+    seed: int,
+    subset_ids: Path | None,
+) -> dict[str, list[str]]:
+    """Trim the training split to a fixed, reproducible set of sentences.
+
+    Both baselines must train on exactly the same sentences or their scores
+    cannot be compared, so the chosen ids are written to subset_ids.json and
+    the other repository reads them back with --subset-ids.
+    """
+    chosen: dict[str, list[str]] = {}
+    if subset_ids is not None:
+        payload = json.loads(subset_ids.read_text(encoding="utf-8"))
+        wanted = {split: set(ids) for split, ids in payload.items()}
+        log(f"Applying the shared subset from {subset_ids}")
+    elif sample_train is not None:
+        import random
+
+        rows = read_jsonl(bundle / "train.jsonl")
+        if sample_train >= len(rows):
+            raise SystemExit(
+                f"--sample-train {sample_train} is not smaller than the {len(rows)} "
+                "available training sentences; omit it to keep them all."
+            )
+        ids = sorted(row.instance_id for row in rows)   # sort first: stable across runs
+        picked = random.Random(seed).sample(ids, sample_train)
+        # dev and test are recorded in full, not sampled: the other repository
+        # must evaluate on exactly these sentences or the F1 scores are not
+        # comparable. This repo's language filter has already removed records
+        # the other one still has.
+        wanted = {
+            "train": set(picked),
+            "dev": {row.instance_id for row in read_jsonl(bundle / "dev.jsonl")},
+            "test": {row.instance_id for row in read_jsonl(bundle / "test.jsonl")},
+        }
+        log(f"Sampling {sample_train}/{len(rows)} training sentences (seed {seed}); "
+            "dev/test recorded in full for cross-repo alignment")
+    else:
+        return chosen
+
+    for split in SPLITS:
+        if split not in wanted:
+            continue
+        path = bundle / f"{split}.jsonl"
+        kept = []
+        with path.open(encoding="utf-8") as stream:
+            lines = [line for line in stream if line.strip()]
+        with path.open("w", encoding="utf-8", newline="\n") as out:
+            for line in lines:
+                row = json.loads(line)
+                if str(row.get("instance_id")) in wanted[split]:
+                    out.write(line if line.endswith("\n") else line + "\n")
+                    kept.append(str(row.get("instance_id")))
+        missing = wanted[split] - set(kept)
+        if missing:
+            raise SystemExit(
+                f"{split}: {len(missing)} ids from the shared subset are not in this "
+                f"bundle, for example {sorted(missing)[:3]}. The two repositories "
+                "started from different data."
+            )
+        chosen[split] = kept
+        print(f"    {split}: kept {len(kept)} sentences")
+    (bundle / "subset_ids.json").write_text(
+        json.dumps(chosen, indent=2) + "\n", encoding="utf-8"
+    )
+    return chosen
+
+
 def download_wheels(wheelhouse: Path) -> None:
     log(f"Step 2/3: downloading Linux py{KAGGLE_PYTHON} wheels")
     wheelhouse.mkdir(parents=True, exist_ok=True)
@@ -170,6 +240,18 @@ def main() -> None:
     )
     cli.add_argument("--staging-dir", type=Path, default=REPO_ROOT / "kaggle_offline_upload")
     cli.add_argument("--archive", type=Path, default=REPO_ROOT / "kaggle_offline_upload.zip")
+    cli.add_argument(
+        "--sample-train",
+        type=int,
+        help="keep only this many training sentences (writes subset_ids.json)",
+    )
+    cli.add_argument("--sample-seed", type=int, default=444)
+    cli.add_argument(
+        "--subset-ids",
+        type=Path,
+        help="reuse the subset_ids.json written by the other repository, so both "
+             "baselines train on identical sentences",
+    )
     cli.add_argument("--skip-wheels", action="store_true", help="reuse an existing wheelhouse")
     args = cli.parse_args()
 
@@ -178,6 +260,7 @@ def main() -> None:
     bundle.mkdir(parents=True, exist_ok=True)
 
     sizes = copy_data(args.data_dir, bundle)
+    select_subset(bundle, args.sample_train, args.sample_seed, args.subset_ids)
     if not args.skip_wheels:
         download_wheels(bundle / "wheelhouse")
     copy_project(staging)

@@ -60,18 +60,30 @@ the T4's 320 GB/s — **2.3x faster for this workload**, for free. (For S2IT,
 which is dominated by fine-tuning rather than decoding, the T4's higher
 compute wins instead.)
 
-### Sessions needed, evaluating the full 1,890-sentence test split
+### Why 1,530 training sentences, and how many sessions
 
-| train sentences | P100, 384 tok | P100, 288 tok | T4, 384 tok |
-|---|---|---|---|
-| 8,815 (full) | 8.9 | 6.7 | 20.3 |
-| 2,934 (= Laptop-ACOS train) | 3.5 | 2.6 | 8.0 |
-| 1,530 (= Restaurant-ACOS train) | 2.2 | 1.7 | 5.1 |
+1,530 is the size of the **Restaurant-ACOS training split**, one of the two
+datasets this method was published on (Laptop-ACOS has 2,934). Training at
+that scale with the paper's K, G and M is a faithful reproduction; keeping
+all 8,815 sentences but cutting K to 2 is not.
 
-Those two reference rows matter: **1,530 and 2,934 are the actual training
-splits both papers use.** Training on ~2,900 sentences is not a reduced
-baseline, it is the scale these methods were designed and published at, and
-it finishes in 3 P100 sessions instead of 7.
+The same 1,530 sentences are in the S2IT bundle and both evaluate on the
+same 1,831 test sentences, so the two baselines are comparable.
+
+Worst-case hours on a **P100**, assuming every generation runs to the
+384-token cap (real chains stop at EOS near ~200 tokens, so expect less):
+
+| phase | hours |
+|---|---|
+| S1-a over 1,591 typed instances | ~5.9 |
+| S2 re-generation for selection | ~5.9 |
+| S1-b, GRPO updates, S3 fine-tuning | ~1 |
+| **training total** | **~13 h = 2 sessions** |
+| S4 over 1,831 test sentences | ~6.8 h = 1 session |
+
+So **3 P100 sessions**: two training (second one with `RESUME_FROM`), then
+one with `RUN_TRAINING = False` and `RESUME_FROM` set, which spends the
+whole session on inference.
 
 **How to run it:**
 
@@ -115,8 +127,10 @@ SAFETY_MARGIN_MINUTES     = 15
 # one read. So K and M are nearly FREE, and only the sentence count and
 # MAX_NEW_TOKENS actually buy wall-clock time. All three are therefore kept at
 # the paper's values.
-MAX_TRAIN_RECORDS = None   # full split (8,815 sentences -> 9,121 typed)
-MAX_TEST_RECORDS  = None   # full split (1,890 sentences)
+# The bundle already carries the agreed 1,530-sentence training subset and
+# the 1,831-sentence test split, shared byte-for-byte with the S2IT bundle.
+MAX_TRAIN_RECORDS = None   # use what the bundle contains
+MAX_TEST_RECORDS  = None   # use what the bundle contains
 CHAINS_PER_TYPE   = 10     # = paper K
 GROUP_SIZE        = 10     # = paper G
 GRPO_STEPS        = 10     # = paper
@@ -126,16 +140,21 @@ INFERENCE_SAMPLES = 5      # = paper M
 MAX_NEW_TOKENS    = 384    # paper: 2048, which that chain never needs
 
 # --- Fine-tuning -------------------------------------------------------------
+# Table 9 (S3) and Table 8 (GRPO), reproduced. The paper's "batch 4, accum 2"
+# is an effective batch of 8, and 1 x 8 is the same optimiser trajectory on a
+# 16 GB card. GRPO keeps its own accumulation so it lands on the paper's
+# effective 4 (2 x 2) independently of S3.
 SELECTED_CHAINS_PER_TYPE = 2
-FINAL_STEPS              = 10
-BATCH_SIZE               = 1    # paper: 4 (needs an A100)
-GRADIENT_ACCUMULATION    = 8    # paper: 2
-GRPO_BATCH_SIZE          = 1    # paper: 2
-CLIP_EPSILON             = 0.2
-KL_COEFFICIENT           = 0.01
-LEARNING_RATE            = 5e-5
-MAX_LENGTH               = 1024 # paper: 2048
-SEED                     = 444  # paper seeds: 444, 555, 666, 777
+FINAL_STEPS              = 10    # = paper
+BATCH_SIZE               = 1     # paper 4, but 1 x 8 == 4 x 2 effective
+GRADIENT_ACCUMULATION    = 8     # effective batch 8 = paper
+GRPO_BATCH_SIZE          = 2     # = paper
+GRPO_GRADIENT_ACCUM      = 2     # = paper, so 2 x 2 = 4 prompts per GRPO step
+CLIP_EPSILON             = 0.2   # = paper
+KL_COEFFICIENT           = 0.01  # = paper
+LEARNING_RATE            = 5e-5  # = paper
+MAX_LENGTH               = 2048  # = paper (costs nothing: sequences are ~525 tokens)
+SEED                     = 444   # paper seeds: 444, 555, 666, 777
 
 # Share of the training budget per phase: S1-a, S1-b, S2, S3.
 STAGE_FRACTIONS = (0.40, 0.10, 0.30, 0.20)
@@ -347,6 +366,7 @@ if RUN_TRAINING:
         grpo_steps=GRPO_STEPS,
         group_size=GROUP_SIZE,
         grpo_batch_size=GRPO_BATCH_SIZE,
+        grpo_gradient_accumulation=GRPO_GRADIENT_ACCUM,
         clip_epsilon=CLIP_EPSILON,
         kl_coefficient=KL_COEFFICIENT,
         selected_chains_per_type=SELECTED_CHAINS_PER_TYPE,

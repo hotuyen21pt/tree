@@ -528,6 +528,7 @@ def train(
     grpo_steps: int = 10,
     group_size: int = 10,
     grpo_batch_size: int = 2,
+    grpo_gradient_accumulation: int = 2,
     clip_epsilon: float = 0.2,
     kl_coefficient: float = 0.01,
     selected_chains_per_type: int = 2,
@@ -656,9 +657,10 @@ def train(
             row.get("chain", "")
         )
     rl_losses = []
-    # Table 8: batch size 2 with gradient accumulation 2, i.e. four prompts per
-    # optimiser step rather than one.
-    prompts_per_step = max(1, grpo_batch_size) * max(1, gradient_accumulation)
+    # Table 8: GRPO uses batch size 2 with gradient accumulation 2, i.e. four
+    # prompts per optimiser step. This is deliberately separate from the SFT
+    # `gradient_accumulation`, which Table 9 sets independently.
+    prompts_per_step = max(1, grpo_batch_size) * max(1, grpo_gradient_accumulation)
     s2_deadline = phase_deadline(2, "S2_grpo")
     # Half of S2 is reserved for re-sampling and scoring the selected chains.
     grpo_deadline = (
@@ -823,7 +825,8 @@ def train(
             "group_size": group_size,
             "steps": grpo_steps,
             "batch_size": grpo_batch_size,
-            "gradient_accumulation": gradient_accumulation,
+            "gradient_accumulation": grpo_gradient_accumulation,
+            "prompts_per_step": prompts_per_step,
             "clip_epsilon": clip_epsilon,
             "kl_coefficient": kl_coefficient,
             "reward_weights": dict(REWARD_WEIGHTS),
