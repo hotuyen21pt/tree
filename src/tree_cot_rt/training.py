@@ -423,7 +423,10 @@ def _sequence_log_probability(model, tokenizer, prompt: str, completion: str, ma
     input_ids = torch.tensor([full_ids], dtype=torch.long, device=device)
     with torch.no_grad():
         logits = model(input_ids=input_ids, use_cache=False).logits
-        log_probs = torch.log_softmax(logits[:, :-1, :], dim=-1)
+        # fp32 regardless of the model dtype: Kaggle's T4/P100 have no bf16,
+        # so these tensors would otherwise be fp16, whose 65504 ceiling the
+        # GRPO ratio exp() can overflow.
+        log_probs = torch.log_softmax(logits[:, :-1, :].float(), dim=-1)
         target_ids = input_ids[:, 1:]
         token_log_probs = log_probs.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
         result = token_log_probs.squeeze(0)[completion_start:]
@@ -439,7 +442,7 @@ def _sequence_log_probability_with_grad(
     device = next(model.parameters()).device
     input_ids = torch.tensor([full_ids], dtype=torch.long, device=device)
     logits = model(input_ids=input_ids, use_cache=False).logits
-    log_probs = torch.log_softmax(logits[:, :-1, :], dim=-1)
+    log_probs = torch.log_softmax(logits[:, :-1, :].float(), dim=-1)
     target_ids = input_ids[:, 1:]
     token_log_probs = log_probs.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
     result = token_log_probs.squeeze(0)[completion_start:]
@@ -494,8 +497,11 @@ def _grpo_accumulate(
             text,
             max_length,
         )
+        # exp(20) is 4.9e8, far past fp16's 65504; the log-probs above are
+        # fp32 so this is safe, and 10 still allows a 22,000x ratio, which a
+        # single clipped GRPO step can never legitimately reach.
         ratio = torch.exp(
-            torch.clamp(new_logp - old_logps[index], min=-20, max=20)
+            torch.clamp(new_logp - old_logps[index], min=-10, max=10)
         )
         unclipped = ratio * advantages[index]
         clipped = torch.clamp(
