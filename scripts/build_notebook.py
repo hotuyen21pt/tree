@@ -53,7 +53,16 @@ expand to 9,121 typed instances, and the method samples chains over all of
 them **twice** — once in S1-a to build the candidate pool, once in S2 to
 select from the optimised policy (Algorithm 3).
 
-### Pick the P100 accelerator, not T4
+### Accelerator: **GPU T4 x2**
+
+Memory decides this before speed does: Qwen2.5-7B in fp16 is 14.2 GiB
+against a single card's 14.6, and S3's LoRA rank 32 needs another 0.92 GiB
+with its AdamW state. Two cards shard the model and keep the paper's rank.
+
+The note below still holds for raw decoding speed, but only applies if the
+model fits at all.
+
+### On bandwidth: P100 decodes faster than T4
 
 Generation is memory-bandwidth bound, and Kaggle's P100 has 732 GB/s against
 the T4's 320 GB/s — **2.3x faster for this workload**, for free. (For S2IT,
