@@ -1,104 +1,276 @@
-# Huong dan ban giao workspace
+# Tree-CoT-RT — Tree-guided CoT + GRPO for ASQP
 
-Tai lieu nay mo ta workspace `method` de agent tiep theo co the tim dung project, hieu cac goi Kaggle va tiep tuc cong viec. Workspace gom hai repository Git doc lap: `s2it/` va `tree/`. Thu muc `method/` hien khong phai repository Git.
+Reproduction of **Tree-CoT-RT** (Zhang et al., *Findings of ACL 2026*; the PDF
+is in this repo as `2026.findings-acl.806.pdf`) for Aspect Sentiment Quad
+Prediction, run on a private hotel-review dataset.
 
-## Muc luc nhanh
+**Purpose: this is a baseline.** Its scores will be published next to another
+method, so faithfulness to the paper matters more than peak F1. Several
+things here look like they could be "optimised" and must not be — see
+[Decisions that must not be reverted](#decisions-that-must-not-be-reverted).
 
-| Duong dan | Noi dung |
+This repo is coupled to a sibling repo, **s2it** (S2IT), the other baseline.
+The two must train and evaluate on byte-identical splits; see
+[Shared data subset](#shared-data-subset).
+
+---
+
+## Current state
+
+| | |
 |---|---|
-| `s2it/` | Cai dat S2IT cho Aspect Sentiment Quad Prediction, notebook Kaggle va goi offline |
-| `tree/` | Cai dat Tree-CoT-RT, notebook Kaggle va goi offline |
-| `.venv/` | Moi truong Python cap workspace; khong phai source code va khong nen dong goi |
+| Status | Code aligned with the paper; **never run end to end** |
+| Tests | 20 pass |
+| Kaggle bundle | Built and ready at `kaggle_offline_upload.zip` (not in git) |
+| Expected cost | 2–3 Kaggle P100 sessions, resumable |
 
-Moi project co Git history rieng. Chay `git -C s2it status --short` hoac `git -C tree status --short` de xem thay doi cua repo tuong ung. Khong chay lenh Git tu thu muc `method/` de thay doi project.
+---
 
-## S2IT (`s2it/`)
+## What the method does
 
-| Tep/thu muc | Vai tro |
+Four steps (paper §3.3–3.6):
+
+| Step | What happens |
 |---|---|
-| `README.md` | Huong dan chi tiet S2IT, chuan bi du lieu/ngon ngu, train, predict va Kaggle |
-| `2025.findings-naacl.379.pdf` | Bai bao tham khao cho phuong phap S2IT |
-| `pyproject.toml` | Metadata, dependencies, lenh CLI va cau hinh pytest |
-| `.gitignore` | Bo qua du lieu `asqp_data/`, virtualenv, cache, bytecode va egg-info |
-| `s2it_kaggle.ipynb` | Notebook Kaggle chinh de chuan bi du lieu, huan luyen va danh gia |
-| `src/asqp_s2it/__init__.py` | Khai bao package |
-| `src/asqp_s2it/cli.py` | Cac lenh CLI train, predict, evaluate va parser |
-| `src/asqp_s2it/data.py` | Doc/kiem tra du lieu JSONL va cac kieu du lieu ASQP |
-| `src/asqp_s2it/language_prep.py` | Gan ma ngon ngu vao tung record JSONL |
-| `src/asqp_s2it/metrics.py` | Tinh precision, recall va micro-F1 cho quadruple |
-| `src/asqp_s2it/model.py` | Nap model/LoRA, sinh va parse du doan |
-| `src/asqp_s2it/prompts.py` | Prompt cho trich cap aspect-opinion va phan loai |
-| `src/asqp_s2it/syntax.py` | Stanza parser va bieu dien dependency relations/subgraph |
-| `src/asqp_s2it/timing.py` | Tien ich do va ghi thoi gian |
-| `src/asqp_s2it/training.py` | Tao du lieu huan luyen va chay cac giai doan S2IT |
-| `scripts/prepare_offline_bundle.py` | Tao bundle phu thuoc/du lieu de chay Kaggle offline |
-| `tests/` | Kiem thu data/ngon ngu, metrics, syntax va timing |
-| `asqp_data/` | Du lieu train/dev/test cuc bo; bi ignore boi Git |
-| `.venv/`, `.pytest_cache/`, `__pycache__/`, `*.egg-info/` | Moi truong va file tao tu dong; khong phai dau vao can commit |
+| **S1-a** | Sample K Tree-CoT chains per *typed instance*, using the type-specific reasoning tree |
+| **S1-b** | Tree-supervised LoRA fine-tuning (tSFT) on the valid chains → the GRPO initial policy |
+| **S2** | GRPO with a rule-based reward, then re-sample and keep the top-N chains per typed instance |
+| **S3** | Fine-tune on the selected chains: sentence → reasoning + quadruples |
+| **S4** | Self-consistent inference: M chains per sentence, majority vote (Eq. 9) |
 
-### Cac goi Kaggle S2IT
+A *typed instance* is a sentence restricted to the quadruples of one ASQP
+type, so a sentence with both an EAEO and an IAEO quad contributes two.
 
-- `kaggle_offline_upload.zip` la archive upload Kaggle hien co.
-- `kaggle_offline_upload/` la thu muc da giai nen/dong goi, gom notebook, `project/` (ban source de notebook import) va `offline_bundle/` (JSONL, Stanza resources, wheelhouse).
-- `offline_bundle/` o goc `s2it/` la nguon du lieu va dependencies offline duoc script tao; no khong nam trong danh sach Git tracked theo `.gitignore` hien tai.
-- Notebook Kaggle va source trong `kaggle_offline_upload/project/` can duoc giu dong bo khi sua code. Sau khi sua source, tao lai goi va tai lai Kaggle Dataset; Kaggle Input cu co the van chua ban code moi.
-- Archive chi dong goi source, data va dependencies phuc vu notebook. Model LLM va dau ra training khong nen mac dinh nam trong archive; model duoc gan nhu Kaggle Input rieng, dau ra nam trong `/kaggle/working/`.
+### The four ASQP types
 
-## Tree-CoT-RT (`tree/`)
+`EAEO`, `EAIO`, `IAEO`, `IAIO` — explicit/implicit aspect × explicit/implicit
+opinion. Each has its own reasoning-step order (paper Table 1), and **that
+order is the method**:
 
-| Tep/thu muc | Vai tro |
+| type | path |
 |---|---|
-| `README.md` | Huong dan su dung project Tree-CoT-RT |
-| `2026.findings-acl.806.pdf` | Bai bao tham khao |
-| `pyproject.toml`, `.gitignore` | Dependencies/cau hinh Python va quy tac bo qua Git |
-| `tree_cot_rt_kaggle.ipynb` | Notebook Kaggle chinh |
-| `src/tree_cot_rt/__init__.py` | Khai bao package |
-| `src/tree_cot_rt/cli.py` | Lenh dong cho project |
-| `src/tree_cot_rt/data.py` | Doc va chuan hoa du lieu |
-| `src/tree_cot_rt/reasoning.py` | Tao/phan tich reasoning theo cau truc cay |
-| `src/tree_cot_rt/rewards.py` | Tinh reward cho huan luyen |
-| `src/tree_cot_rt/training.py` | Pipeline huan luyen va du doan |
-| `tests/test_reasoning.py` | Kiem thu reasoning |
-| `asqp_data/` | Du lieu train/dev/test cuc bo; bi ignore boi Git |
-| `kaggle_offline_upload/` | Noi dung da giai nen de upload, gom notebook, README upload, project va offline bundle |
-| `kaggle_offline_upload.zip` | Archive upload Kaggle |
+| EAEO | identify A + O → pair → sentiment → category |
+| EAIO | identify A → **infer O** → sentiment → category |
+| IAEO | identify O → **infer A** → sentiment → category |
+| IAIO | context → infer A and O → sentiment → category |
 
-Trong goi Tree-CoT-RT, `UPLOAD_README.txt` ghi ro can gan Kaggle Model rieng, bat GPU, khong can Internet; archive khong chua model weights.
+---
 
-## Vi sao dong goi ZIP?
+## Decisions that must not be reverted
 
-ZIP la cach giao nhieu loai tai san thanh mot Kaggle Dataset de upload/gan vao notebook chi trong mot lan. Kaggle co the su dung notebook, source Python, du lieu JSONL va cac wheel Stanza trong mot input offline co cau truc on dinh. Trong archive, duong dan dung dau `/` de tuong thich voi Kaggle/Linux. Model lon duoc gan rieng qua Kaggle Model thay vi nhan ban trong archive.
+| Decision | Why |
+|---|---|
+| Type names are **EAEO / EAIO / IAEO / IAIO** | The original code used `EE/EA/IE/IA`, where `"A"` meant *implicit opinion*. Every positional check (`quad_type[1] == "A"`) was unreadable and two of the four reasoning paths were wrong because of it. |
+| **EAIO infers the opinion before deriving sentiment/category; IAEO infers the aspect before deriving sentiment** | Table 1. The original code assigned the category before inferring the opinion (EAIO) and derived the sentiment before inferring the aspect (IAEO), which inverts the paper's core idea. |
+| **S3 and S4 are type-agnostic** | §3.6 prompts once per sentence with no gold type, because the type is unknown at test time. The original code enumerated all four types and unioned the results: 4× the cost and wrecked precision. S3 therefore trains on the full gold quad set with a type-free prompt so training and inference agree. |
+| `R_cons` is **element-wise with bipartite matching** | Eq. 10. Exact-quad F1 scores three-of-four elements as zero, leaving GRPO with no gradient early on. |
+| `R_valid` is the **normalised count** of satisfied path constraints | Appendix C.1, not a boolean. |
+| `R_impl` requires a **sentence-grounded cue span** | Appendix C.1. Previously any occurrence of "because" earned full credit, making the component with the largest ablation drop (−5.39 F1) a no-op. |
+| `R_div` measures distance from the **Step-1 template chains** | Eq. 11, not from the current sampling group. |
+| GRPO KL uses the **k3 estimator** | Eq. 7: `π_ref/π − log(π_ref/π) − 1`, not `log π − log π_ref`. |
+| **GRPO has its own gradient accumulation** | Table 8 sets GRPO to effective batch 4 (2×2) while Table 9 sets S3 to effective 8. Sharing one accumulation value cannot satisfy both. |
+| GRPO **skips the optimiser step when every group is degenerate** | All-equal rewards give zero advantage; AdamW would still apply weight decay to a zero gradient. |
+| `CHAINS_PER_TYPE = 10`, `GROUP_SIZE = 10` | **Raising K and G is nearly free.** Decoding a 7B model is memory-bandwidth bound: every step reads all 14 GB of weights whatever K is, and `num_return_sequences` batches the K chains into that one read. K=2 and K=10 measure the same wall-clock time. K=2 with `SELECTED_CHAINS_PER_TYPE=2` also made S2's selection a no-op — top-2 of at most 2 discards nothing — removing the mechanism the paper's `w/o GRPO-RL` ablation values at 3.92 F1. |
+| `BATCH_SIZE=1`, `GRADIENT_ACCUMULATION=8` | Table 9's "batch 4, accumulation 2" is an **effective batch of 8**. Same optimiser trajectory, fits 16 GB. Not a deviation. |
+| `MAX_LENGTH = 2048` | The paper's value, and it costs nothing: real sequences measure ~525 tokens and the collator pads to the longest in the batch, not to the cap. |
 
-Thu muc `kaggle_offline_upload/` giup kiem tra/chinh sua noi dung truoc khi tao archive; file ZIP la artifact upload da dong goi. Khi source thay doi, can tao lai ZIP tu ban thu muc hien hanh va cap nhat Kaggle Dataset. Khong sua truc tiep mot ban giai nen cu roi quen cap nhat archive.
+### Known deviations from the paper
 
-## Tep khong dua len GitHub
+| Deviation | Reason |
+|---|---|
+| `MAX_NEW_TOKENS = 384`, paper says 2048 | It is a **cap, not a target** — generation stops at EOS. The paper's own IAIO example chain (Table 14) measures ~201 tokens. 384 only bounds a model that fails to emit EOS. 2048 would multiply the worst case by 5. |
+| **S1-a chains are generated by the local Qwen model**, not an external API | The paper uses Gemini 2.5 Pro / ChatGPT for S1-a. Kaggle has no Internet. To follow the paper, generate chains elsewhere and pre-populate `stage1_candidates.jsonl`, which the generation stage reuses when the prompt still matches. |
+| Training set is 1,530 sentences, not all 8,815 | See [Why 1,530](#why-1530-sentences). Hyperparameters are the paper's. |
+| Dataset is this project's hotel reviews, not Restaurant/Laptop ACOS | The paper's published numbers are not comparable to these. |
 
-Hien tai, trong moi repo, `git status` la nguon chinh xac nhat de biet tep nao chua tracked. `.gitignore` khong cho them mot so tep vao Git; cac goi Kaggle va archive co the hien la untracked cho den khi duoc chu dong commit.
+---
 
-| Nhom | Vi du | Ly do khong dua len GitHub |
-|---|---|---|
-| Du lieu | `s2it/asqp_data/`, `tree/asqp_data/`, JSONL trong offline bundle | Co the lon, co han che phan phoi/giay phep; quan ly va cap phat qua Kaggle Dataset hoac nguon du lieu duoc phep |
-| Model/checkpoint | Model goc, LoRA adapter, weights | Rat lon; quan ly qua Kaggle Models hoac kho artifact phu hop |
-| Dependencies offline | `wheelhouse/*.whl`, `stanza_resources/**/*.pt` | Binary lon, phu thuoc phien ban/nha cung cap; chi dua vao goi offline can upload |
-| Goi upload | `kaggle_offline_upload/`, `kaggle_offline_upload.zip` | Artifact tao ra de phuc vu Kaggle; co the tai tao tu source va script dong goi |
-| Moi truong va cache | `.venv/`, `.pytest_cache/`, `__pycache__/`, `*.pyc`, `*.egg-info/` | Rieng may, tao tu dong, khong can thiet cho nguoi khac clone project |
-| Ket qua chay | Log, predictions, checkpoints, training output | Co the nang va tao lai; chi luu trong repo neu co muc dich phan tich/tai lap cu the |
+## A caveat about this dataset
 
-Khong commit file chi vi no xuat hien trong workspace. Truoc khi commit, kiem tra noi dung, kich thuoc, quyen phan phoi du lieu/model va `git status --short`. README khong tu dong thay doi `.gitignore` hay upload bat ky tep nao.
+Typed-instance distribution on the 1,530-sentence training subset:
 
-## Trang thai lan chay S2IT gan nhat
+| EAEO | IAEO | EAIO | IAIO |
+|---|---|---|---|
+| 1,497 | 66 | 28 | **0** |
 
-Theo log duoc cung cap, ca ba giai doan fine-tuning hoan tat; adapter va tokenizer da luu vao `/kaggle/working/s2it_outputs/final`, metrics vao `final/training_metrics.json`, va thoi gian vao `training_time.csv`. Notebook sau do gap `JSONDecodeError` tai buoc inference/danh gia trong `predict()`, luc parse output classification cua model. Day la loi output JSON cua lan suy luan, khong phai loi huan luyen; can chay lai evaluation sau khi sua/bo sung xu ly output loi. Cac warning `temperature/top_p/top_k` bi bo qua khi `do_sample=False`, khong phai nguyen nhan traceback.
+Same shape on the full 8,815 sentences (EAEO 8,611, IAEO 370, EAIO 140,
+IAIO 0). **This data has essentially no implicit cases, and no IAIO at all.**
 
-## Huong dan cho agent tiep theo
+Tree-CoT-RT is a paper *about* implicit sentiment; IAIO is the case it
+emphasises most and where it reports its largest gains. On this dataset that
+contribution cannot show up. The baseline is still valid as a baseline, but
+any claim comparing implicit-sentiment handling will be uninformative here.
+Worth stating explicitly in the write-up.
 
-1. Xac dinh project nguoi dung dang noi toi (`s2it/` hay `tree/`) va doc README tuong ung cung README nay.
-2. Kiem tra `git -C <project> status --short` truoc khi sua; khong ghi de thay doi dang co.
-3. Neu thay doi source S2IT dung cho Kaggle, cap nhat ca `src/asqp_s2it/` va ban source dong goi trong `kaggle_offline_upload/project/src/asqp_s2it/`; kiem tra notebook import tu source nao.
-4. Neu can tao lai goi offline, xem `scripts/prepare_offline_bundle.py`, `UPLOAD_README.txt` (Tree-CoT-RT) va README project. Xac nhan danh sach file trong ZIP truoc khi upload Kaggle.
-5. Khong chay lai huan luyen S2IT mac dinh: lan gan nhat mat hon 8 gio va adapter da duoc luu tren Kaggle. Truoc tien danh gia lai tu adapter hien co neu no con truy cap duoc. Model/checkpoint nam ngoai repo may cuc bo cho den khi duoc tai ve.
-6. Chi chay kiem thu/lenh dai khi yeu cau cong viec can; khong co lenh training nao duoc tu dong thuc hien boi README nay.
+---
 
-## Trang thai Git luc tao tai lieu
+## Layout
 
-Luc kiem tra, repo S2IT co `s2it_kaggle.ipynb` thay doi chua commit; `kaggle_offline_upload/`, `offline_bundle/` va `kaggle_offline_upload.zip` chua tracked. Repo Tree-CoT-RT co thay doi chua commit tai `src/tree_cot_rt/reasoning.py`, `src/tree_cot_rt/training.py` va `tree_cot_rt_kaggle.ipynb`; `kaggle_offline_upload/` va `kaggle_offline_upload.zip` chua tracked. Hay xem lai `git status --short` truoc khi sua/commit vi trang thai co the doi. Cac thay doi nay la cua nguoi dung va phai duoc bao toan.
+```
+src/tree_cot_rt/
+  reasoning.py    TREE_PATHS, prompts, chain validity, majority voting
+  rewards.py      R_cons / R_valid / R_impl / R_div and group advantages
+  training.py     S1-a, S1-b, S2 (GRPO + selection), S3, and predict() for S4
+  data.py         JSONL reader, Quad/Instance, quad_type()
+  budget.py       Budget/Deadline: stop a phase before Kaggle kills the session
+  cli.py          train | predict | evaluate
+scripts/
+  prepare_offline_bundle.py   build the Kaggle upload (data, wheels, zip)
+  build_notebook.py           regenerate the notebook — EDIT THIS, not the .ipynb
+tests/                        20 tests, no GPU needed
+```
+
+> `tree_cot_rt_kaggle.ipynb` is **generated**. Edit `scripts/build_notebook.py`
+> and re-run it, or your change is lost on the next rebuild.
+
+This project has **no dependency parser** — unlike s2it there is no Stanza
+step and no language tagging, and `langdetect` is not a dependency.
+
+---
+
+## Data
+
+Not in git. Expected locally as `converted_apc/{train,dev,test}.jsonl`
+(8,815 / 1,895 / 1,890 sentences). `asqp_data/` is also accepted.
+
+### Shared data subset
+
+Build the **s2it bundle first** — it applies the language filter and picks the
+training subset — then point this one at the ids it wrote:
+
+```bash
+python scripts/prepare_offline_bundle.py \
+    --subset-ids ../s2it/kaggle_offline_upload/offline_bundle/subset_ids.json
+```
+
+Both bundles then hold identical splits (verified: 1,530 / 1,846 / 1,831,
+same ids, same texts). Without this the two baselines would be measured on
+different test sets, because s2it's language filter drops records this repo
+keeps.
+
+**Any third method compared against these baselines must use the same
+`subset_ids.json`.**
+
+Output: `kaggle_offline_upload.zip` (~15 MB) with `project/`,
+`offline_bundle/`, `UPLOAD_README.txt` and the notebook. No model weights.
+
+### The evaluation set
+
+**The test split is never sampled.** Training was cut to 1,530 sentences on
+purpose; evaluation keeps every sentence it can score.
+
+| | sentences |
+|---|---|
+| `converted_apc/test.jsonl` as delivered | 1,890 |
+| removed by the language filter | 59 |
+| **evaluated, by both baselines** | **1,831** |
+
+Those 59 are spread over 17 languages with no parser in the supported set
+(ro, es, af, ca, no, da, it, sv, ko, cy, et, ru, sw, tl, nl, pt, hr). S2IT
+structurally cannot score them: it needs a dependency parse, and Stanza has
+no model for them here. 1,831 is therefore the largest test set the two
+baselines can share.
+
+So:
+
+- **s2it vs tree** — valid, identical 1,831 sentences, verified id by id.
+- **vs a third method** — valid only if it is scored on the same 1,831.
+  Use `offline_bundle/subset_ids.json`, which lists them.
+- **vs the numbers printed in the papers** — not comparable at all. Those
+  are Restaurant/Laptop ACOS; this is a private hotel-review dataset.
+
+A method that needs no parser could be scored on all 1,890, but then it is
+no longer comparable to S2IT. Report 1,831 for everything.
+
+### Why 1,530 sentences
+
+1,530 is the size of the **Restaurant-ACOS training split**, one of the two
+datasets this method was published on (Laptop-ACOS has 2,934). Reducing data
+while keeping the paper's K, G and M is a faithful reproduction at a published
+scale; keeping all 8,815 sentences but cutting K to 2 is a broken method.
+
+---
+
+## Running on Kaggle
+
+Upload the zip as a Dataset, import `tree_cot_rt_kaggle.ipynb`, attach the
+Dataset plus the **Qwen2.5-7B-Instruct** Kaggle Model, Run All.
+
+- **Accelerator: P100.** This workload is dominated by decoding, which is
+  memory-bandwidth bound, and the P100 has 732 GB/s against the T4's 320 —
+  2.3× faster here for free. (S2IT is the opposite case and wants the T4.)
+- **Internet: Off.**
+
+### This needs more than one session
+
+Worst-case hours on a P100, assuming every generation runs to the 384-token
+cap (real chains stop at EOS near ~200, so expect less):
+
+| phase | hours |
+|---|---|
+| S1-a over 1,591 typed instances | ~5.9 |
+| S2 re-generation for selection | ~5.9 |
+| S1-b, GRPO updates, S3 | ~1 |
+| **training total** | **~13 h → 2 sessions** |
+| S4 over 1,831 test sentences | ~6.8 h → 1 session |
+
+Plan: two training sessions (the second with `RESUME_FROM`), then one with
+`RUN_TRAINING = False` and `RESUME_FROM` set, which spends the whole session
+on inference.
+
+### Resuming
+
+Every phase has a deadline from `budget.py`. S1-a degrades gracefully: the
+chains it produced become the candidate pool, everything downstream still
+runs, and the session reports the coverage reached plus a projection of how
+many sessions remain.
+
+To continue: *Save Version*, attach that output to the next run, set
+`RESUME_FROM` to its `tree_cot_rt_outputs` path. Cached chains whose prompt
+still matches are reused, so S1-a continues where it stopped. `RESUME_FROM`
+also copies the LoRA adapter, so a session can evaluate without retraining.
+
+> Changing a prompt invalidates the cache — cached chains are keyed by
+> `(instance_id, quad_type, prompt, generator_model)`. After editing
+> `reasoning.py`, previous candidates are regenerated.
+
+---
+
+## Local development
+
+```bash
+pip install -e ".[dev]"
+python -m pytest -q        # 20 pass, no GPU needed
+```
+
+CLI:
+
+```bash
+tree-cot-rt train    --train train.jsonl --dev dev.jsonl --output-dir runs/tree
+tree-cot-rt predict  --input test.jsonl --adapter-dir runs/tree/final \
+                     --base-model Qwen/Qwen2.5-7B --output preds.jsonl
+tree-cot-rt evaluate --gold test.jsonl --predictions preds.jsonl
+```
+
+`train(..., time_budget_seconds=None)` disables the deadlines, which is what
+you want off Kaggle.
+
+---
+
+## Not in git
+
+`converted_apc/`, `kaggle_offline_upload/`, `kaggle_offline_upload.zip`,
+`runs/`, caches. All reproducible from the data plus
+`scripts/prepare_offline_bundle.py`. A fresh clone has no data.
+
+---
+
+## Open items
+
+- **Never run end to end.** Every runtime figure here is extrapolated from a
+  memory-bandwidth model, not measured. Expect ±40%; the first session prints
+  the real rate and re-projects.
+- S1-a uses the local model instead of the external APIs the paper used.
+- `dev_instances` is loaded and counted but not otherwise used by `train()`.
+- No IAIO instances exist in this dataset, so that part of the method is
+  exercised by nothing.
