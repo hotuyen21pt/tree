@@ -278,17 +278,49 @@ code(r'''
 # ===================== INSTALL WHEELS AND IMPORT PROJECT ====================
 import subprocess
 
-# Only pinned local wheels; --no-deps keeps the resolver off the network.
-# Kaggle already ships torch, numpy and pandas.
-wheels = sorted(Path(WHEELHOUSE).glob("*.whl"))
-if wheels:
+import importlib
+
+# Kaggle ships a complete, CUDA-matched stack and keeps bumping it. Passing
+# bare package names to pip here did nothing at all - pip answered
+# "Requirement already satisfied" for every one and the bundled wheels were
+# never installed. Rather than force a downgrade across a major transformers
+# release onto Kaggle's much newer torch, the wheelhouse is now a fallback
+# for packages that are genuinely absent, and the versions actually in use
+# are printed below so a run can be reproduced.
+REQUIRED = ("transformers", "tokenizers", "accelerate", "peft",
+            "huggingface_hub", "safetensors")
+
+# peft >= 0.19 *raises* instead of returning False when torchao is installed
+# but older than it wants, and the Kaggle image pairs a new peft with a stale
+# torchao. Nothing here uses torchao quantisation, so dropping it is the fix.
+subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "-q", "torchao"],
+               check=False)
+
+missing = []
+for name in REQUIRED:
+    try:
+        importlib.import_module(name)
+    except ImportError:
+        missing.append(name)
+
+if missing:
+    print("Installing from the offline wheelhouse:", ", ".join(missing))
     subprocess.check_call([
         sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
-        "--no-index", "--no-deps", "--find-links", WHEELHOUSE,
-        *[w.name.split("-")[0].replace("_", "-") for w in wheels],
+        "--no-index", "--no-deps", "--find-links", WHEELHOUSE, *missing,
     ])
+    for name in missing:
+        importlib.invalidate_caches()
+        importlib.import_module(name)
 else:
-    print("No wheelhouse found; relying on the preinstalled Kaggle packages.")
+    print("Every required package is already present; wheelhouse not needed.")
+
+# Belt and braces: if torchao could not be removed, neutralise peft's probe.
+try:
+    import peft.tuners.lora.torchao as _lora_torchao
+    _lora_torchao.is_torchao_available = lambda: False
+except Exception:
+    pass
 
 import json
 import pandas as pd
@@ -301,7 +333,11 @@ from tree_cot_rt.reasoning import typed_instances
 from tree_cot_rt.timing import format_duration
 from tree_cot_rt.training import predict, train
 
-print("PyTorch:", torch.__version__, "| CUDA:", torch.cuda.is_available())
+import platform, transformers, peft, accelerate
+print("python      :", platform.python_version())
+print("torch       :", torch.__version__, "| CUDA:", torch.cuda.is_available())
+print("transformers:", transformers.__version__)
+print("peft        :", peft.__version__, "| accelerate:", accelerate.__version__)
 if not torch.cuda.is_available():
     raise RuntimeError("Enable a Kaggle GPU accelerator before running this notebook.")
 ''')

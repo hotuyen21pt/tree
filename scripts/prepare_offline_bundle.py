@@ -43,7 +43,7 @@ WHEELS = (
     "huggingface-hub==0.28.1",
     "safetensors==0.6.2",
 )
-KAGGLE_PYTHON = "3.12"  # Kaggle image Python; check a run log if it changes
+KAGGLE_PYTHON = "3.13"  # Kaggle image Python; check a run log if it changes
 KAGGLE_PLATFORM = "manylinux2014_x86_64"
 
 PROJECT_FILES = ("pyproject.toml", "README.md")

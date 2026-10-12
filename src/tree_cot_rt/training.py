@@ -31,6 +31,21 @@ from .rewards import REWARD_WEIGHTS, group_advantages, score_chain
 from .timing import format_duration
 
 
+def _dtype_kwargs(dtype) -> dict[str, Any]:
+    """`torch_dtype` is deprecated in transformers 5, which renamed it `dtype`.
+
+    Kaggle's image moves between major versions, so pick the name the
+    installed library actually accepts instead of pinning to one of them.
+    """
+    import transformers
+
+    try:
+        major = int(transformers.__version__.split(".")[0])
+    except (AttributeError, ValueError):
+        major = 4
+    return {"dtype": dtype} if major >= 5 else {"torch_dtype": dtype}
+
+
 def _dtype() -> torch.dtype:
     if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
         return torch.bfloat16
@@ -47,9 +62,9 @@ def _load_tokenizer(model_name: str):
 def _load_base(model_name: str):
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=_dtype(),
         device_map="auto" if torch.cuda.is_available() else None,
         trust_remote_code=True,
+        **_dtype_kwargs(_dtype()),
     )
     model.config.use_cache = False
     return model
