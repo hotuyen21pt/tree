@@ -1,79 +1,104 @@
-# Tree-CoT-RT cho Aspect Sentiment Quad Prediction
+# Huong dan ban giao workspace
 
-Project triển khai flow **Tree-CoT-RT: An Explainable Multi-Path Tree-Guided Chain-of-Thought and Reinforcement Learning Framework for Aspect Sentiment Quad Prediction** theo paper [Findings of ACL 2026](https://aclanthology.org/2026.findings-acl.806/).
+Tai lieu nay mo ta workspace `method` de agent tiep theo co the tim dung project, hieu cac goi Kaggle va tiep tuc cong viec. Workspace gom hai repository Git doc lap: `s2it/` va `tree/`. Thu muc `method/` hien khong phai repository Git.
 
-Input của bạn ở `asqp_data/` có `train.jsonl`, `dev.jsonl`, `test.jsonl`. Mỗi dòng phải có `instance_id`, `text`, `quads`; các trường khác được bỏ qua. Mỗi quad dùng đúng bốn trường:
+## Muc luc nhanh
 
-- `aspect_term`: chuỗi hoặc `null`
-- `aspect_category`: nhãn category
-- `opinion_term`: chuỗi hoặc `null`
-- `sentiment`: nhãn sentiment
+| Duong dan | Noi dung |
+|---|---|
+| `s2it/` | Cai dat S2IT cho Aspect Sentiment Quad Prediction, notebook Kaggle va goi offline |
+| `tree/` | Cai dat Tree-CoT-RT, notebook Kaggle va goi offline |
+| `.venv/` | Moi truong Python cap workspace; khong phai source code va khong nen dong goi |
 
-Loader giữ thông tin implicit từ `aspect_implicit`/`opinion_implicit` khi có, và cũng coi term `null` là implicit. Một câu có thể chứa nhiều quad thuộc các loại explicit/implicit khác nhau; project nhóm chúng theo bốn loại của paper: **EE, EA, IE, IA** (aspect trước, opinion sau) để huấn luyện và suy luận riêng từng reasoning tree.
+Moi project co Git history rieng. Chay `git -C s2it status --short` hoac `git -C tree status --short` de xem thay doi cua repo tuong ung. Khong chay lenh Git tu thu muc `method/` de thay doi project.
 
-## Pipeline paper
+## S2IT (`s2it/`)
 
-1. **S1-a — Multi-path Tree-CoT generation:** tạo `K=10` reasoning chains cho từng cặp câu/loại quad bằng các prompt tree riêng cho EE/EA/IE/IA. Các chain lưu vào `stage1_candidates.jsonl`.
-2. **S1-b — tSFT:** lọc chain parse được và hợp lệ theo loại tree, rồi LoRA fine-tune Qwen2.5-7B-Instruct (rank 8, alpha 16, dropout 0.05, 15 steps) để khởi tạo policy.
-3. **S2 — GRPO-RL và offline selection:** GRPO group size 10, clipping 0.2, KL 0.01; reward gộp consistency với gold, validity của JSON/quad type/ordered tree steps, cue cho implicit reasoning, và diversity so với các chain cùng câu/type (mặc định mỗi thành phần 0.25). Lưu policy và các chain chọn ở `stage2_grpo_policy/` và `stage2_selected_chains.jsonl`.
-4. **S3 — reasoning-aware SFT:** khởi tạo model cuối Qwen2.5-7B, fine-tune LoRA trên chain được chọn cùng gold quadruples; adapter nằm trong `final/`.
-5. **S4 — self-consistent inference:** lấy mẫu nhiều chain riêng cho từng loại tree, bỏ nhãn không đúng loại, sau đó majority vote quadruple trong từng nhóm để không làm mất các loại quad hiếm.
+| Tep/thu muc | Vai tro |
+|---|---|
+| `README.md` | Huong dan chi tiet S2IT, chuan bi du lieu/ngon ngu, train, predict va Kaggle |
+| `2025.findings-naacl.379.pdf` | Bai bao tham khao cho phuong phap S2IT |
+| `pyproject.toml` | Metadata, dependencies, lenh CLI va cau hinh pytest |
+| `.gitignore` | Bo qua du lieu `asqp_data/`, virtualenv, cache, bytecode va egg-info |
+| `s2it_kaggle.ipynb` | Notebook Kaggle chinh de chuan bi du lieu, huan luyen va danh gia |
+| `src/asqp_s2it/__init__.py` | Khai bao package |
+| `src/asqp_s2it/cli.py` | Cac lenh CLI train, predict, evaluate va parser |
+| `src/asqp_s2it/data.py` | Doc/kiem tra du lieu JSONL va cac kieu du lieu ASQP |
+| `src/asqp_s2it/language_prep.py` | Gan ma ngon ngu vao tung record JSONL |
+| `src/asqp_s2it/metrics.py` | Tinh precision, recall va micro-F1 cho quadruple |
+| `src/asqp_s2it/model.py` | Nap model/LoRA, sinh va parse du doan |
+| `src/asqp_s2it/prompts.py` | Prompt cho trich cap aspect-opinion va phan loai |
+| `src/asqp_s2it/syntax.py` | Stanza parser va bieu dien dependency relations/subgraph |
+| `src/asqp_s2it/timing.py` | Tien ich do va ghi thoi gian |
+| `src/asqp_s2it/training.py` | Tao du lieu huan luyen va chay cac giai doan S2IT |
+| `scripts/prepare_offline_bundle.py` | Tao bundle phu thuoc/du lieu de chay Kaggle offline |
+| `tests/` | Kiem thu data/ngon ngu, metrics, syntax va timing |
+| `asqp_data/` | Du lieu train/dev/test cuc bo; bi ignore boi Git |
+| `.venv/`, `.pytest_cache/`, `__pycache__/`, `*.egg-info/` | Moi truong va file tao tu dong; khong phai dau vao can commit |
 
-Các giá trị mặc định bám bảng hyperparameter paper; model size và dữ liệu bên dưới khác cấu hình benchmark gốc. Cần GPU Kaggle đủ bộ nhớ (khuyến nghị A100 40GB trở lên) và Internet để tải model/dependencies. Việc sinh chain và GRPO trên 8,815 training records có thể tốn nhiều giờ/GPU; output S1/S2 được cache thành JSONL để chạy tiếp mà không tạo lại chain đã có.
+### Cac goi Kaggle S2IT
 
-## Điểm khác với thiết lập paper
+- `kaggle_offline_upload.zip` la archive upload Kaggle hien co.
+- `kaggle_offline_upload/` la thu muc da giai nen/dong goi, gom notebook, `project/` (ban source de notebook import) va `offline_bundle/` (JSONL, Stanza resources, wheelhouse).
+- `offline_bundle/` o goc `s2it/` la nguon du lieu va dependencies offline duoc script tao; no khong nam trong danh sach Git tracked theo `.gitignore` hien tai.
+- Notebook Kaggle va source trong `kaggle_offline_upload/project/` can duoc giu dong bo khi sua code. Sau khi sua source, tao lai goi va tai lai Kaggle Dataset; Kaggle Input cu co the van chua ban code moi.
+- Archive chi dong goi source, data va dependencies phuc vu notebook. Model LLM va dau ra training khong nen mac dinh nam trong archive; model duoc gan nhu Kaggle Input rieng, dau ra nam trong `/kaggle/working/`.
 
-- Paper đánh giá trên Restaurant-ACOS và Laptop-ACOS; project dùng dataset khách sạn được cung cấp, 8,815 train / 1,895 dev / 1,890 test và sáu category (`FACILITY`, `AMENITY`, `SERVICE`, `EXPERIENCE`, `LOYALTY`, `BRANDING`). Các F1 không thể so sánh trực tiếp với bảng kết quả của paper.
-- Paper tạo S1 chains qua API ChatGPT/Gemini. Để notebook Kaggle chạy độc lập với API key, implementation này dùng `Qwen2.5-7B-Instruct` local làm chain generator. Đây là thay đổi có chủ ý; nếu thay generator thì các chain và kết quả có thể khác paper.
-- Mặc định chạy một seed `444`; paper báo trung bình bốn seed `444/555/666/777` trên bốn A100.
-- Repo GitHub được dẫn trong paper hiện không có source code công khai; đây là implementation độc lập theo mô tả paper, không phải bản sao official.
+## Tree-CoT-RT (`tree/`)
 
-## Chạy local
+| Tep/thu muc | Vai tro |
+|---|---|
+| `README.md` | Huong dan su dung project Tree-CoT-RT |
+| `2026.findings-acl.806.pdf` | Bai bao tham khao |
+| `pyproject.toml`, `.gitignore` | Dependencies/cau hinh Python va quy tac bo qua Git |
+| `tree_cot_rt_kaggle.ipynb` | Notebook Kaggle chinh |
+| `src/tree_cot_rt/__init__.py` | Khai bao package |
+| `src/tree_cot_rt/cli.py` | Lenh dong cho project |
+| `src/tree_cot_rt/data.py` | Doc va chuan hoa du lieu |
+| `src/tree_cot_rt/reasoning.py` | Tao/phan tich reasoning theo cau truc cay |
+| `src/tree_cot_rt/rewards.py` | Tinh reward cho huan luyen |
+| `src/tree_cot_rt/training.py` | Pipeline huan luyen va du doan |
+| `tests/test_reasoning.py` | Kiem thu reasoning |
+| `asqp_data/` | Du lieu train/dev/test cuc bo; bi ignore boi Git |
+| `kaggle_offline_upload/` | Noi dung da giai nen de upload, gom notebook, README upload, project va offline bundle |
+| `kaggle_offline_upload.zip` | Archive upload Kaggle |
 
-Tại thư mục `tree/`:
+Trong goi Tree-CoT-RT, `UPLOAD_README.txt` ghi ro can gan Kaggle Model rieng, bat GPU, khong can Internet; archive khong chua model weights.
 
-```powershell
-python -m pip install -e ".[dev]"
-tree-cot-rt train `
-  --train asqp_data/train.jsonl `
-  --dev asqp_data/dev.jsonl `
-  --model Qwen/Qwen2.5-7B-Instruct `
-  --final-model Qwen/Qwen2.5-7B `
-  --output-dir runs/tree_cot_rt
-```
+## Vi sao dong goi ZIP?
 
-Inference trên toàn bộ test set với năm sample cho mỗi tree:
+ZIP la cach giao nhieu loai tai san thanh mot Kaggle Dataset de upload/gan vao notebook chi trong mot lan. Kaggle co the su dung notebook, source Python, du lieu JSONL va cac wheel Stanza trong mot input offline co cau truc on dinh. Trong archive, duong dan dung dau `/` de tuong thich voi Kaggle/Linux. Model lon duoc gan rieng qua Kaggle Model thay vi nhan ban trong archive.
 
-```powershell
-tree-cot-rt predict `
-  --input asqp_data/test.jsonl `
-  --adapter-dir runs/tree_cot_rt/final `
-  --base-model Qwen/Qwen2.5-7B `
-  --samples 5 `
-  --output runs/tree_cot_rt/test_predictions.jsonl
+Thu muc `kaggle_offline_upload/` giup kiem tra/chinh sua noi dung truoc khi tao archive; file ZIP la artifact upload da dong goi. Khi source thay doi, can tao lai ZIP tu ban thu muc hien hanh va cap nhat Kaggle Dataset. Khong sua truc tiep mot ban giai nen cu roi quen cap nhat archive.
 
-tree-cot-rt evaluate `
-  --gold asqp_data/test.jsonl `
-  --predictions runs/tree_cot_rt/test_predictions.jsonl
-```
+## Tep khong dua len GitHub
 
-Metric là exact-match micro-precision/recall/F1: một quad chỉ đúng khi đủ cả bốn trường khớp trong đúng `instance_id`; không chấm partial match.
+Hien tai, trong moi repo, `git status` la nguon chinh xac nhat de biet tep nao chua tracked. `.gitignore` khong cho them mot so tep vao Git; cac goi Kaggle va archive co the hien la untracked cho den khi duoc chu dong commit.
 
-Các tham số paper có thể giảm cho smoke test, ví dụ `--chains-per-type 1 --grpo-steps 1 --selected-chains-per-type 1 --final-steps 1 --max-new-tokens 256`. Kết quả smoke test không đại diện kết quả nghiên cứu.
+| Nhom | Vi du | Ly do khong dua len GitHub |
+|---|---|---|
+| Du lieu | `s2it/asqp_data/`, `tree/asqp_data/`, JSONL trong offline bundle | Co the lon, co han che phan phoi/giay phep; quan ly va cap phat qua Kaggle Dataset hoac nguon du lieu duoc phep |
+| Model/checkpoint | Model goc, LoRA adapter, weights | Rat lon; quan ly qua Kaggle Models hoac kho artifact phu hop |
+| Dependencies offline | `wheelhouse/*.whl`, `stanza_resources/**/*.pt` | Binary lon, phu thuoc phien ban/nha cung cap; chi dua vao goi offline can upload |
+| Goi upload | `kaggle_offline_upload/`, `kaggle_offline_upload.zip` | Artifact tao ra de phuc vu Kaggle; co the tai tao tu source va script dong goi |
+| Moi truong va cache | `.venv/`, `.pytest_cache/`, `__pycache__/`, `*.pyc`, `*.egg-info/` | Rieng may, tao tu dong, khong can thiet cho nguoi khac clone project |
+| Ket qua chay | Log, predictions, checkpoints, training output | Co the nang va tao lai; chi luu trong repo neu co muc dich phan tich/tai lap cu the |
 
-## Chạy trên Kaggle
+Khong commit file chi vi no xuat hien trong workspace. Truoc khi commit, kiem tra noi dung, kich thuoc, quyen phan phoi du lieu/model va `git status --short`. README khong tu dong thay doi `.gitignore` hay upload bat ky tep nao.
 
-1. Upload thư mục project (bao gồm `pyproject.toml` và `src/tree_cot_rt/`) thành Kaggle Dataset.
-2. Upload `asqp_data/` thành một Kaggle Dataset khác hoặc gom chung vào source dataset.
-3. Tạo notebook mới từ `tree_cot_rt_kaggle.ipynb`, bấm **Add Input** cho hai dataset, bật **GPU** và **Internet** trong Notebook settings.
-4. Sửa `PROJECT_DIR`/`DATA_DIR` ở cell cấu hình nếu auto-detect không chọn đúng input.
-5. Run all; adapters, candidate chains, prediction JSONL và metric được ghi trong `/kaggle/working/tree_cot_rt_outputs/`.
+## Trang thai lan chay S2IT gan nhat
 
-Notebook có chế độ smoke test qua các biến `CHAINS_PER_TYPE`, `GRPO_STEPS`, `FINAL_STEPS`, `MAX_TRAIN_RECORDS`, `MAX_TEST_RECORDS`. Để chạy đầy đủ, để `MAX_*_RECORDS = None` và giữ các giá trị hyperparameter mặc định.
+Theo log duoc cung cap, ca ba giai doan fine-tuning hoan tat; adapter va tokenizer da luu vao `/kaggle/working/s2it_outputs/final`, metrics vao `final/training_metrics.json`, va thoi gian vao `training_time.csv`. Notebook sau do gap `JSONDecodeError` tai buoc inference/danh gia trong `predict()`, luc parse output classification cua model. Day la loi output JSON cua lan suy luan, khong phai loi huan luyen; can chay lai evaluation sau khi sua/bo sung xu ly output loi. Cac warning `temperature/top_p/top_k` bi bo qua khi `do_sample=False`, khong phai nguyen nhan traceback.
 
-## Kiểm thử
+## Huong dan cho agent tiep theo
 
-```powershell
-python -m pytest
-```
-# tree
+1. Xac dinh project nguoi dung dang noi toi (`s2it/` hay `tree/`) va doc README tuong ung cung README nay.
+2. Kiem tra `git -C <project> status --short` truoc khi sua; khong ghi de thay doi dang co.
+3. Neu thay doi source S2IT dung cho Kaggle, cap nhat ca `src/asqp_s2it/` va ban source dong goi trong `kaggle_offline_upload/project/src/asqp_s2it/`; kiem tra notebook import tu source nao.
+4. Neu can tao lai goi offline, xem `scripts/prepare_offline_bundle.py`, `UPLOAD_README.txt` (Tree-CoT-RT) va README project. Xac nhan danh sach file trong ZIP truoc khi upload Kaggle.
+5. Khong chay lai huan luyen S2IT mac dinh: lan gan nhat mat hon 8 gio va adapter da duoc luu tren Kaggle. Truoc tien danh gia lai tu adapter hien co neu no con truy cap duoc. Model/checkpoint nam ngoai repo may cuc bo cho den khi duoc tai ve.
+6. Chi chay kiem thu/lenh dai khi yeu cau cong viec can; khong co lenh training nao duoc tu dong thuc hien boi README nay.
+
+## Trang thai Git luc tao tai lieu
+
+Luc kiem tra, repo S2IT co `s2it_kaggle.ipynb` thay doi chua commit; `kaggle_offline_upload/`, `offline_bundle/` va `kaggle_offline_upload.zip` chua tracked. Repo Tree-CoT-RT co thay doi chua commit tai `src/tree_cot_rt/reasoning.py`, `src/tree_cot_rt/training.py` va `tree_cot_rt_kaggle.ipynb`; `kaggle_offline_upload/` va `kaggle_offline_upload.zip` chua tracked. Hay xem lai `git status --short` truoc khi sua/commit vi trang thai co the doi. Cac thay doi nay la cua nguoi dung va phai duoc bao toan.

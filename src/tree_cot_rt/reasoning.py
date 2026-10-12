@@ -123,18 +123,32 @@ def parse_quads(text: str) -> list[dict[str, str | None]] | None:
 def chain_is_valid(text: str, quad_type: str) -> bool:
     parsed = parse_quads(text)
     obj = _json_object(text)
-    if parsed is None or obj is None or not isinstance(obj.get("reasoning"), str):
+    if (
+        parsed is None
+        or obj is None
+        or not isinstance(obj.get("reasoning"), str)
+        or not obj["reasoning"].strip()
+    ):
         return False
     reasoning = obj["reasoning"].casefold()
     step_count = 3 if quad_type == "EE" else 4
+    # Some instruction-tuned models ignore the requested `Step 1:` labels but
+    # still return useful, type-correct reasoning. Accept that free-form text.
+    # If the model does use numbered step labels, require the complete ordered
+    # sequence so malformed Tree-CoT is still rejected.
     step_positions = []
     for number in range(1, step_count + 1):
-        match = re.search(rf"(?:^|\s)(?:step\s*)?{number}[).:]\s", reasoning)
-        if match is None:
+        match = re.search(
+            rf"(?:^|\s)(?:\*\*)?(?:step\s*)?{number}\s*[).:：\-–—]\s*",
+            reasoning,
+        )
+        step_positions.append(match.start() if match else None)
+    if any(position is not None for position in step_positions):
+        if any(position is None for position in step_positions):
             return False
-        step_positions.append(match.start())
-    if step_positions != sorted(step_positions):
-        return False
+        ordered_positions = [position for position in step_positions if position is not None]
+        if ordered_positions != sorted(ordered_positions):
+            return False
     quad_sentiments = {}
     for quad in parsed:
         key = (quad["aspect_term"], quad["aspect_category"], quad["opinion_term"])

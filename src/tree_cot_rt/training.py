@@ -270,7 +270,10 @@ def _generation_stage(
             for row in cached_by_id[(typed.instance_id, typed.quad_type)]
             if row.get("prompt") == prompt
             and row.get("generator_model") == generator_name
+            and chain_is_valid(row.get("chain", ""), typed.quad_type)
         ]
+        for row in prior:
+            row["valid"] = True
         candidates = list(prior)
         if len(candidates) < count:
             generated = _generate(
@@ -437,6 +440,9 @@ def _grpo_update(
             -torch.minimum(unclipped, clipped)
             + kl_coefficient * (new_logp - ref_logps[index])
         ) / len(completions)
+        # Log-probabilities are token vectors; reduce each completion's
+        # token-level objective to a scalar before backward().
+        loss = loss.mean()
         loss.backward()
         losses.append(float(loss.detach().cpu()))
     torch.nn.utils.clip_grad_norm_(
@@ -500,9 +506,15 @@ def train(
     started = time.perf_counter()
     s1_examples = _sft_examples(initial_candidates, valid_only=True)
     if not s1_examples:
+        examples = [
+            f"- type={row.get('quad_type')}, valid={row.get('valid')}, chain={row.get('chain', '')[:1200]!r}"
+            for row in initial_candidates[:3]
+        ]
         raise ValueError(
-            "No parseable Tree-CoT chains were generated. Inspect stage1_candidates.jsonl, "
-            "increase max_new_tokens, or choose a JSON-instruction-tuned model."
+            "No valid Tree-CoT chains were generated for S1-b. Inspect "
+            f"{output / 'stage1_candidates.jsonl'}; first candidates:\n" + "\n".join(examples)
+            + "\nThe notebook will regenerate invalid cached candidates on the next run. "
+            "If outputs are truncated, increase MAX_NEW_TOKENS."
         )
     tSFT_dir = output / "stage1_tsft"
     tSFT_model = _fit_lora(
