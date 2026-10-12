@@ -81,6 +81,7 @@ def _train(args: argparse.Namespace) -> None:
         max_length=args.max_length,
         max_new_tokens=args.max_new_tokens,
         seed=args.seed,
+        final_lora_rank=args.final_lora_rank,
     )
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
 
@@ -158,6 +159,13 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--max-length", type=int, default=2048)
     train_parser.add_argument("--max-new-tokens", type=int, default=1024)
     train_parser.add_argument("--seed", type=int, default=444)
+    train_parser.add_argument(
+        "--final-lora-rank",
+        type=int,
+        default=32,
+        help="S3 LoRA rank. The paper uses 32, which needs more GPU memory "
+             "than a single 16 GB card has; 8 fits but is a deviation.",
+    )
     train_parser.set_defaults(func=_train)
 
     predict_parser = commands.add_parser("predict", help="predict with the final LoRA adapter")

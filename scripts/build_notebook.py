@@ -166,6 +166,10 @@ MAX_NEW_TOKENS    = 384    # paper: 2048, which that chain never needs
 # is an effective batch of 8, and 1 x 8 is the same optimiser trajectory on a
 # 16 GB card. GRPO keeps its own accumulation so it lands on the paper's
 # effective 4 (2 x 2) independently of S3.
+# S3's LoRA rank. The paper uses 32, which does not fit a single 16 GB card
+# (a 7B in fp16 is already 14.2 GiB). Lower it to 8 only if 'GPU T4 x2' is
+# unavailable, and record the deviation.
+FINAL_LORA_RANK          = 32    # = paper
 SELECTED_CHAINS_PER_TYPE = 2
 FINAL_STEPS              = 10    # = paper
 BATCH_SIZE               = 1     # paper 4, but 1 x 8 == 4 x 2 effective
@@ -458,6 +462,7 @@ if RUN_TRAINING:
         max_length=MAX_LENGTH,
         max_new_tokens=MAX_NEW_TOKENS,
         seed=SEED,
+        final_lora_rank=FINAL_LORA_RANK,
         time_budget_seconds=train_budget,
         stage_fractions=STAGE_FRACTIONS,
     )

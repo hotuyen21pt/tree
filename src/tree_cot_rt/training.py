@@ -859,6 +859,7 @@ def train(
     max_length: int = 2048,
     max_new_tokens: int = 1024,
     seed: int = 444,
+    final_lora_rank: int = 32,
     time_budget_seconds: float | None = None,
     stage_fractions: tuple[float, float, float, float] = (0.40, 0.10, 0.30, 0.20),
 ) -> dict[str, Any]:
@@ -894,7 +895,7 @@ def train(
     times: dict[str, float] = {}
     run_started = time.perf_counter()
 
-    check_gpu_memory(model_name, 32)   # S3 uses the largest rank of the run
+    check_gpu_memory(model_name, final_lora_rank)   # S3 uses the largest rank of the run
     print("S1-a: generating local multi-path Tree-CoT candidates (K =", chains_per_type, ")")
     started = time.perf_counter()
     tokenizer = _load_tokenizer(model_name)
@@ -1112,8 +1113,11 @@ def train(
         final_tokenizer,
         final_examples,
         final_dir,
-        rank=32,
-        alpha=32,
+        rank=final_lora_rank,
+        # Table 9 pairs rank 32 with alpha 32, a LoRA scaling of 1. Keeping
+        # alpha equal to the rank preserves that scaling if a smaller card
+        # forces the rank down.
+        alpha=final_lora_rank,
         dropout=0.1,
         steps=final_steps,
         batch_size=batch_size,
@@ -1152,6 +1156,7 @@ def train(
             "kl_coefficient": kl_coefficient,
             "reward_weights": dict(REWARD_WEIGHTS),
         },
+        "s3_lora_rank": final_lora_rank,
         "stage_seconds": times,
         "training_seconds": sum(times.values()),
         "total_elapsed_seconds": time.perf_counter() - run_started,
