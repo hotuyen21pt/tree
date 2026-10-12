@@ -446,6 +446,17 @@ def _examples_for_typed(instances: list[Instance], categories: list[str]):
             yield typed, reasoning_prompt(typed.text, typed.quad_type, categories)
 
 
+def _generator_identity(name: str) -> str:
+    """Identify the generator by model directory, not by mount path.
+
+    Kaggle mounts the same model under a different path between sessions, and
+    a cache keyed on the full path is then silently discarded - which costs
+    hours of regeneration for chains that were perfectly good.
+    """
+    base, separator, suffix = str(name).partition(" (")
+    return Path(base).name + separator + suffix
+
+
 def _write_candidates(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as stream:
@@ -486,6 +497,29 @@ def _generation_stage(
         cached_by_id[(row.get("instance_id"), row.get("quad_type"))].append(row)
     rows = []
     total = sum(1 for _ in _examples_for_typed(instances, categories))
+    if cached:
+        reusable = sum(
+            1
+            for typed, prompt in _examples_for_typed(instances, categories)
+            if any(
+                row.get("prompt") == prompt
+                and _generator_identity(row.get("generator_model", ""))
+                == _generator_identity(generator_name)
+                and chain_is_valid(row.get("chain", ""), typed.quad_type)
+                for row in cached_by_id[(typed.instance_id, typed.quad_type)]
+            )
+        )
+        print(
+            f"Cache: {len(cached)} chains on disk, covering {reusable}/{total} "
+            "typed instances for this prompt and model.",
+            flush=True,
+        )
+        if not reusable:
+            print(
+                "  None are reusable - the prompt or the model changed, so every "
+                "chain will be regenerated. Stop now if that is not intended.",
+                flush=True,
+            )
     covered = 0
     for index, (typed, prompt) in enumerate(_examples_for_typed(instances, categories), 1):
         # Generating K chains for every typed instance is by far the most
@@ -502,7 +536,8 @@ def _generation_stage(
             row
             for row in cached_by_id[(typed.instance_id, typed.quad_type)]
             if row.get("prompt") == prompt
-            and row.get("generator_model") == generator_name
+            and _generator_identity(row.get("generator_model", ""))
+            == _generator_identity(generator_name)
             and chain_is_valid(row.get("chain", ""), typed.quad_type)
         ]
         for row in prior:

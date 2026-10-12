@@ -227,3 +227,17 @@ def test_majority_vote_uses_majority_or_plurality():
     assert majority_vote([first, "not JSON"])[0]["sentiment"] == "positive"
     wrong_type = '{"quadruples":[{"aspect_term":null,"aspect_category":"FACILITY","opinion_term":"clean","sentiment":"positive"}]}'
     assert majority_vote([first, wrong_type], expected_type="EAEO")[0]["sentiment"] == "positive"
+
+
+def test_generator_identity_survives_a_remount():
+    """Kaggle mounts the same model at different paths between sessions."""
+    from tree_cot_rt.training import _generator_identity
+
+    a = "/kaggle/input/models/dipamc77/qwen2.5-7b-instruct/transformers/default/1/Qwen2.5-7B-Instruct"
+    b = "/kaggle/input/models/someone-else/qwen/transformers/v2/3/Qwen2.5-7B-Instruct"
+    assert _generator_identity(a) == _generator_identity(b)
+    # The GRPO policy must stay distinct from the base generator.
+    assert _generator_identity(a + " (GRPO policy)") != _generator_identity(a)
+    assert _generator_identity(a + " (GRPO policy)") == _generator_identity(b + " (GRPO policy)")
+    # A genuinely different model must not collide.
+    assert _generator_identity(a) != _generator_identity("/x/Qwen2.5-32B-Instruct")
