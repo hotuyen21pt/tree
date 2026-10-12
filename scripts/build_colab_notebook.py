@@ -61,12 +61,36 @@ selection → S3 fine-tuning → S4 self-consistent inference).
 
 3. Run all cells.
 
-## Across sessions
+## Closing the laptop
 
-Outputs go to Drive, so a reclaimed session loses no work: the S1-a chains in
-`stage1_candidates.jsonl` are reused on the next run and only the uncovered
-typed instances are generated. The first thing the generation stage prints is
-how much of the cache it can reuse.
+Colab runs on Google's machine, not yours, so the network link is what is at
+risk, not the computation. What survives depends on the tier:
+
+| | closing the tab | idle timeout | hard limit |
+|---|---|---|---|
+| Free | runtime continues a while, then is reclaimed | ~90 min | ~12 h |
+| Pro | same | longer | longer |
+| Pro+ | **background execution**: officially supported | - | longer |
+
+Only Pro+ advertises background execution. On the other tiers, closing the
+browser means the session is on borrowed time, and the keep-alive scripts that
+circulate are both unreliable and against Colab's terms.
+
+**This notebook is built for the session to die.** Outputs are on Drive and
+the cache is replaced atomically, so an interrupted run costs the phase in
+progress, never the chains already generated:
+
+- S1-a chains land in `stage1_candidates.jsonl` on Drive every 25 typed
+  instances, written beside the target and renamed, so the file on disk is
+  always complete.
+- Re-running the notebook reuses them with nothing to configure. The
+  generation stage prints how much of the cache it can reuse before it
+  generates anything.
+- Lower `SESSION_BUDGET_HOURS` to match your tier so phases stop on their own
+  terms rather than being cut off.
+
+So the practical answer is to let it be interrupted and simply run it again,
+rather than trying to keep the browser alive.
 """)
 
 code(r'''

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import random
 import time
 from collections import defaultdict
@@ -508,10 +509,23 @@ def _generator_identity(name: str) -> str:
 
 
 def _write_candidates(path: Path, rows: list[dict[str, Any]]) -> None:
+    """Replace the cache atomically.
+
+    This file is rewritten every 25 typed instances and is the only thing that
+    makes a lost session cheap to resume. A Colab runtime reclaimed, or a
+    Kaggle session stopped, part way through a plain overwrite leaves a
+    truncated last line, and the next run then fails to read any of it - which
+    loses every chain generated so far. Writing beside the target and renaming
+    means the cache is always either the previous complete file or the new one.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as stream:
+    temporary = path.with_name(path.name + ".partial")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
         for row in rows:
             stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
 
 
 def _read_candidates(path: Path) -> list[dict[str, Any]]:
@@ -519,13 +533,25 @@ def _read_candidates(path: Path) -> list[dict[str, Any]]:
     if not path.is_file():
         return rows
     with path.open(encoding="utf-8") as stream:
-        for line_number, line in enumerate(stream, 1):
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError as error:
-                raise ValueError(f"{path}:{line_number}: invalid JSON: {error}") from error
-            if isinstance(row, dict):
-                rows.append(row)
+        lines = stream.readlines()
+    for line_number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as error:
+            if line_number == len(lines):
+                # A torn last line is what an interrupted write leaves behind.
+                # Dropping one chain is far better than discarding the cache.
+                print(
+                    f"{path}: last line is incomplete and was skipped; "
+                    f"{len(rows)} chains recovered.",
+                    flush=True,
+                )
+                break
+            raise ValueError(f"{path}:{line_number}: invalid JSON: {error}") from error
+        if isinstance(row, dict):
+            rows.append(row)
     return rows
 
 
