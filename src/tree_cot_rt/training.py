@@ -130,6 +130,47 @@ def _dtype_kwargs(dtype) -> dict[str, Any]:
     return {"dtype": dtype} if major >= 5 else {"torch_dtype": dtype}
 
 
+def _auto_device_map() -> str | None:
+    """Shard across GPUs only when there is more than one.
+
+    With a single device `device_map="auto"` offloads whatever does not fit to
+    CPU instead of failing. That is roughly fifty times slower and presents as
+    a run that simply never finishes, so one GPU loads normally and lets
+    `check_gpu_memory` decide whether the configuration is possible at all.
+    """
+    if not torch.cuda.is_available():
+        return None
+    return "auto" if torch.cuda.device_count() > 1 else None
+
+
+def assert_not_offloaded(model: Any) -> None:
+    """Stop if accelerate placed any layer on CPU or disk.
+
+    An offloaded layer copies its weights over PCIe on every forward and every
+    backward pass. A stage that should take half an hour then reports an ETA of
+    twenty-two hours, which is how this was found.
+    """
+    device_map = getattr(model, "hf_device_map", None)
+    if not device_map:
+        return
+    placements: dict[str, int] = {}
+    for device in device_map.values():
+        placements[str(device)] = placements.get(str(device), 0) + 1
+    print(f"Model placement: {placements}", flush=True)
+    spilled = sorted(
+        name for name, device in device_map.items() if str(device) in {"cpu", "disk"}
+    )
+    if spilled:
+        raise RuntimeError(
+            f"{len(spilled)} module(s) were offloaded to CPU or disk because they "
+            f"did not fit in GPU memory, for example {spilled[:3]}.\n"
+            "Training would still run, roughly fifty times slower, so it stops "
+            "here instead.\n"
+            "  - Switch the Kaggle accelerator to 'GPU T4 x2', or\n"
+            "  - Lower LORA_RANK and MAX_LENGTH and record the deviation."
+        )
+
+
 def _model_parameter_count(model_name: str) -> int | None:
     """Parameter count from the config alone, without loading any weights."""
     try:
@@ -250,10 +291,11 @@ def _load_tokenizer(model_name: str):
 def _load_base(model_name: str):
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        device_map="auto" if torch.cuda.is_available() else None,
+        device_map=_auto_device_map(),
         trust_remote_code=True,
         **_dtype_kwargs(_dtype()),
     )
+    assert_not_offloaded(model)
     model.config.use_cache = False
     return model
 
