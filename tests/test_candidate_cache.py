@@ -1,7 +1,7 @@
 """The chain cache is the only thing that makes a lost session cheap to resume.
 
-A Colab runtime is reclaimed without warning and a Kaggle session can be
-stopped at any point. The cache is rewritten every 25 typed instances, so an
+A Kaggle session can be stopped at any point, and one already was after two
+hours of generation. The cache is rewritten every 25 typed instances, so an
 interrupted write is a realistic event, and it used to leave a truncated last
 line that made the next run fail to read any of the file at all.
 """

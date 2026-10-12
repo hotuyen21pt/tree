@@ -512,11 +512,11 @@ def _write_candidates(path: Path, rows: list[dict[str, Any]]) -> None:
     """Replace the cache atomically.
 
     This file is rewritten every 25 typed instances and is the only thing that
-    makes a lost session cheap to resume. A Colab runtime reclaimed, or a
-    Kaggle session stopped, part way through a plain overwrite leaves a
-    truncated last line, and the next run then fails to read any of it - which
-    loses every chain generated so far. Writing beside the target and renaming
-    means the cache is always either the previous complete file or the new one.
+    makes a lost session cheap to resume. A session stopped part way through a
+    plain overwrite leaves a truncated last line, and the next run then fails
+    to read any of it - which loses every chain generated so far. Writing
+    beside the target and renaming means the cache on disk is always either
+    the previous complete file or the new one.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".partial")
