@@ -45,17 +45,43 @@ Runs the paper's four steps with **no Internet**, inside a **9-hour** Kaggle ses
 
 Settings: **Accelerator = GPU**, **Internet = Off**.
 
-> **S1-a dominates the cost.** Sampling K chains for every typed instance is by
-> far the most expensive phase, and a 7B model on a Kaggle GPU cannot cover a
-> full ACOS training split in 9 hours. `MAX_TRAIN_RECORDS` and `CHAINS_PER_TYPE`
-> below are sized for one session; the budget is a backstop that keeps whatever
-> was generated rather than losing the run.
->
-> **Order of magnitude on this dataset:** 8,815 training sentences expand to
-> roughly 10,500 typed instances. At ~30 s to sample 4 chains, a full S1-a pass
-> would take about 87 GPU-hours. `MAX_TRAIN_RECORDS = 300` keeps one session's
-> S1-a near 3 hours; raise it only if you are willing to run several sessions
-> and resume from `stage1_candidates.jsonl`.
+## Running full data across sessions
+
+This notebook is configured for the **whole training split**, which one
+9-hour session cannot finish. Generation is the reason: 8,815 sentences
+expand to 9,121 typed instances, and the method samples chains over all of
+them **twice** — once in S1-a to build the candidate pool, once in S2 to
+select from the optimised policy (Algorithm 3).
+
+Cost at `CHAINS_PER_TYPE = 2`, `MAX_NEW_TOKENS = 320` (~20 s per typed
+instance):
+
+| phase | GPU-hours |
+|---|---|
+| S1-a generation over 9,121 typed instances | ~51 |
+| S2 re-generation for offline selection | ~51 |
+| S4 full test split, 5 samples/sentence | ~29 |
+| **total** | **~131 h ≈ 15 sessions ≈ 4-5 weeks of Kaggle quota** |
+
+For comparison, the paper's own `K = 10` with 2,048-token chains would cost
+roughly 586 GPU-hours.
+
+**How to run it:**
+
+1. Run this notebook. S1-a stops at its deadline and reports the coverage it
+   reached; everything downstream still runs, so the session produces a
+   usable adapter and metrics.
+2. *Save Version* so `tree_cot_rt_outputs/` becomes an output.
+3. Next session: attach that output and set `RESUME_FROM` to its
+   `tree_cot_rt_outputs` path. Cached chains whose prompt still matches are
+   reused, so S1-a continues from where it stopped.
+4. Repeat until the coverage line reports all 9,121 typed instances.
+
+Each session reports a projection of how many more are needed.
+
+> Lowering `CHAINS_PER_TYPE` to 1 roughly halves the cost but leaves S1-b and
+> the GRPO selection with a single candidate per typed instance, so invalid
+> chains cannot be filtered out and nothing is actually being selected.
 """)
 
 code(r'''
@@ -68,19 +94,22 @@ SESSION_START = time.perf_counter()
 # Every phase stops at its own deadline instead.
 SESSION_BUDGET_HOURS      = 9.0   # Kaggle GPU session limit
 SETUP_RESERVE_MINUTES     = 20    # wheels + model load
-INFERENCE_RESERVE_MINUTES = 90    # S4 sampling is 5 generations per sentence
+INFERENCE_RESERVE_MINUTES = 90    # partial S4; the full split needs its own
+                                  # session (RUN_TRAINING = False + RESUME_FROM)
 SAFETY_MARGIN_MINUTES     = 15
 
 # --- Scale -------------------------------------------------------------------
-# Paper values are in the right-hand column; the defaults are what fits a
-# single 9h Kaggle session on a 16 GB GPU.
-MAX_TRAIN_RECORDS = 300    # paper: the whole split (8,815 here)
-MAX_TEST_RECORDS  = 200    # paper: the whole split (1,890 here)
-CHAINS_PER_TYPE   = 4      # paper: K = 10
-GROUP_SIZE        = 6      # paper: G = 10
+# Paper values are in the right-hand column.
+# Full data. S1-a cannot cover it in one session, so the run is resumable:
+# see "Running full data across sessions" below. K and the chain length are
+# cut hard to buy coverage, which is the trade this scale forces.
+MAX_TRAIN_RECORDS = None   # full split (8,815 sentences -> 9,121 typed)
+MAX_TEST_RECORDS  = None   # full split (1,890 sentences)
+CHAINS_PER_TYPE   = 2      # paper: K = 10
+GROUP_SIZE        = 4      # paper: G = 10
 GRPO_STEPS        = 10     # paper: K = 10 GRPO steps
 INFERENCE_SAMPLES = 5      # paper: M = 5
-MAX_NEW_TOKENS    = 512    # paper: 2048
+MAX_NEW_TOKENS    = 320    # paper: 2048
 
 # --- Fine-tuning -------------------------------------------------------------
 SELECTED_CHAINS_PER_TYPE = 2
@@ -102,6 +131,10 @@ RUN_INFERENCE = True
 
 # --- Paths -------------------------------------------------------------------
 OUTPUT_DIR  = "/kaggle/working/tree_cot_rt_outputs"
+# Point this at an attached previous run's `tree_cot_rt_outputs` to continue
+# S1-a where the last session stopped. Cached chains whose prompt still
+# matches are reused, so only uncovered typed instances are generated.
+RESUME_FROM = None
 BASE_MODEL  = None   # auto-discovered; set to override
 PROJECT_DIR = None
 DATA_DIR    = None
@@ -178,6 +211,28 @@ for required in (
 ):
     if not required.exists():
         raise FileNotFoundError(f"Missing offline input: {required}")
+
+# Seed the output directory from a previous session so S1-a resumes.
+if RESUME_FROM is not None:
+    import shutil
+    resumed = []
+    for name in ("stage1_candidates.jsonl", "stage2_policy_candidates.jsonl"):
+        source = Path(RESUME_FROM) / name
+        if source.is_file():
+            shutil.copy2(source, Path(OUTPUT_DIR) / name)
+            resumed.append(f"{name} ({source.stat().st_size / 1e6:.1f} MB)")
+    # Carry the adapter too, so RUN_TRAINING = False can evaluate it.
+    adapter_source = Path(RESUME_FROM) / "final"
+    if (adapter_source / "adapter_config.json").is_file():
+        shutil.copytree(adapter_source, Path(OUTPUT_DIR) / "final", dirs_exist_ok=True)
+        resumed.append("final/ (LoRA adapter)")
+    if not resumed:
+        raise FileNotFoundError(
+            f"RESUME_FROM is set but no candidate file was found under {RESUME_FROM}. "
+            "Attach the previous run's output and point RESUME_FROM at its "
+            "tree_cot_rt_outputs directory."
+        )
+    print("Resuming from:", ", ".join(resumed))
 
 sys.path.insert(0, str(Path(PROJECT_DIR) / "src"))
 print("Project :", PROJECT_DIR)
@@ -312,6 +367,26 @@ if training_metrics:
 
     print("Generated chains:", training_metrics.get("generated_chains"))
     print("Selected chains :", training_metrics.get("selected_chains"))
+
+    # Project how much of S1-a is left, so the next session is predictable.
+    covered = len({
+        (row.get("instance_id"), row.get("quad_type"))
+        for row in (json.loads(line) for line in
+                    (Path(OUTPUT_DIR) / "stage1_candidates.jsonl").read_text(encoding="utf-8").splitlines()
+                    if line.strip())
+    }) if (Path(OUTPUT_DIR) / "stage1_candidates.jsonl").is_file() else 0
+    total_typed = len(typed_rows)
+    s1a_seconds = stage_seconds.get("S1a_generation", 0.0)
+    print()
+    print(f"S1-a coverage: {covered}/{total_typed} typed instances "
+          f"({covered / total_typed * 100:.1f}%)")
+    if covered and covered < total_typed:
+        rate = s1a_seconds / covered
+        remaining_hours = (total_typed - covered) * rate / 3600
+        budget_hours = train_budget * STAGE_FRACTIONS[0] / 3600 if RUN_TRAINING else 1.0
+        print(f"At {rate:.1f} s/typed instance, the rest needs "
+              f"{remaining_hours:.0f} GPU-h ~ {remaining_hours / max(budget_hours, 0.1):.0f} more session(s).")
+        print("Save Version, then set RESUME_FROM to this run's tree_cot_rt_outputs.")
     truncated = training_metrics.get("budget", {}).get("truncated_phases", [])
     if truncated:
         print("Stopped early to stay inside the budget:", ", ".join(truncated))
