@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import random
 import time
@@ -29,6 +30,89 @@ from .reasoning import (
 )
 from .rewards import REWARD_WEIGHTS, group_advantages, score_chain
 from .timing import format_duration
+
+
+#: TrainingArguments fields this project cannot silently lose. Transformers
+#: renames and removes arguments across majors - `evaluation_strategy` became
+#: `eval_strategy` in 4.41, `warmup_ratio` is gone in 5.x - and Kaggle's image
+#: moves between majors, so everything else is filtered against the installed
+#: signature and reported rather than assumed.
+_ESSENTIAL_TRAINING_ARGS = (
+    "output_dir",
+    "learning_rate",
+    "num_train_epochs",
+    "max_steps",
+    "per_device_train_batch_size",
+    "gradient_accumulation_steps",
+    "lr_scheduler_type",
+)
+
+
+def _accepted_training_args() -> set[str] | None:
+    """Field names the installed TrainingArguments takes, or None if unknown.
+
+    Tried most reliable first. A signature that collapsed to bare `*args,
+    **kwargs` tells us nothing and is skipped; if every source does, None is
+    returned and nothing is filtered, so a genuine mistake still raises.
+    """
+    import dataclasses
+
+    sources = []
+    for probe in (
+        lambda: set(inspect.signature(TrainingArguments).parameters),
+        lambda: {field.name for field in dataclasses.fields(TrainingArguments)},
+        lambda: set(inspect.signature(TrainingArguments.__init__).parameters),
+    ):
+        try:
+            sources.append(probe())
+        except (TypeError, ValueError):
+            continue
+    for names in sources:
+        names -= {"self", "args", "kwargs"}
+        if names:
+            return names
+    return None
+
+
+def _training_arguments(**desired: Any) -> TrainingArguments:
+    """Build TrainingArguments, dropping fields this transformers cannot take."""
+    import transformers
+
+    accepted = _accepted_training_args()
+    if accepted is None:
+        # Could not introspect; pass everything through rather than guess.
+        return TrainingArguments(**desired)
+    lost_essential = [
+        name for name in _ESSENTIAL_TRAINING_ARGS
+        if name in desired and name not in accepted
+    ]
+    if lost_essential:
+        raise RuntimeError(
+            f"transformers {transformers.__version__} does not accept "
+            f"{lost_essential} on TrainingArguments. Dropping these would change "
+            "the training configuration silently, so the run stops instead. Pin "
+            "the bundled transformers version, or map them to the new names."
+        )
+    dropped = sorted(name for name in desired if name not in accepted)
+    if dropped:
+        print(
+            f"[transformers {transformers.__version__}] TrainingArguments does not "
+            f"accept {dropped}; continuing without them.",
+            flush=True,
+        )
+        # Losing these does not fail here, it fails later as an out-of-memory
+        # error that looks unrelated, so say so now.
+        memory_critical = sorted(
+            {"gradient_checkpointing", "fp16", "bf16"}.intersection(dropped)
+        )
+        if memory_critical:
+            print(
+                f"  WARNING: {memory_critical} control precision and activation "
+                "memory. Without them this run is likely to exhaust GPU memory. "
+                "Set PIN_BUNDLED_VERSIONS = True to use the bundled transformers.",
+                flush=True,
+            )
+    return TrainingArguments(**{k: v for k, v in desired.items() if k in accepted})
 
 
 def _dtype_kwargs(dtype) -> dict[str, Any]:
@@ -188,7 +272,7 @@ def _fit_lora(
     model = _prepare_for_training(model, rank, alpha, dropout)
     trainer = Trainer(
         model=model,
-        args=TrainingArguments(
+        args=_training_arguments(
             output_dir=str(output_dir / "trainer"),
             max_steps=steps,
             learning_rate=learning_rate,
