@@ -48,10 +48,10 @@ Settings: **Accelerator = GPU**, **Internet = Off**.
 ## Running full data across sessions
 
 This notebook is configured for the **whole training split**, which one
-9-hour session cannot finish. Generation is the reason: 8,815 sentences
-expand to 9,121 typed instances, and the method samples chains over all of
-them **twice** — once in S1-a to build the candidate pool, once in S2 to
-select from the optimised policy (Algorithm 3).
+9-hour session cannot finish. Generation is the reason: the bundle's 8,557
+sentences expand to 8,859 typed instances, and the method samples chains over
+all of them **twice** — once in S1-a to build the candidate pool, once in S2
+to select from the optimised policy (Algorithm 3).
 
 ### Accelerator: **GPU T4 x2**
 
@@ -69,30 +69,28 @@ the T4's 320 GB/s — **2.3x faster for this workload**, for free. (For S2IT,
 which is dominated by fine-tuning rather than decoding, the T4's higher
 compute wins instead.)
 
-### Why 1,530 training sentences, and how many sessions
+### How many sessions the full training split needs
 
-1,530 is the size of the **Restaurant-ACOS training split**, one of the two
-datasets this method was published on (Laptop-ACOS has 2,934). Training at
-that scale with the paper's K, G and M is a faithful reproduction; keeping
-all 8,815 sentences but cutting K to 2 is not.
-
-The same 1,530 sentences are in the S2IT bundle and both evaluate on the
-same 1,831 test sentences, so the two baselines are comparable.
+Training uses the whole 8,557-sentence split — **8,859 typed instances** — the
+same sentences the S2IT bundle holds, with both evaluated on the same 1,831
+test sentences. `offline_bundle/subset_ids.json` lists the ids.
 
 Worst-case hours on a **P100**, assuming every generation runs to the
 384-token cap (real chains stop at EOS near ~200 tokens, so expect less):
 
 | phase | hours |
 |---|---|
-| S1-a over 1,591 typed instances | ~5.9 |
-| S2 re-generation for selection | ~5.9 |
-| S1-b, GRPO updates, S3 fine-tuning | ~1 |
-| **training total** | **~13 h = 2 sessions** |
+| S1-a over 8,859 typed instances | ~33 |
+| S2 re-generation for selection | ~33 |
+| S1-b, GRPO updates, S3 fine-tuning | ~6 |
+| **training total** | **~71 h = 9 sessions** |
 | S4 over 1,831 test sentences | ~6.8 h = 1 session |
 
-So **3 P100 sessions**: two training (second one with `RESUME_FROM`), then
-one with `RUN_TRAINING = False` and `RESUME_FROM` set, which spends the
-whole session on inference.
+So roughly **10 P100 sessions**: nine training, each after the first with
+`RESUME_FROM` set, then one with `RUN_TRAINING = False` and `RESUME_FROM` set,
+which spends the whole session on inference. These hours are extrapolated from
+a memory-bandwidth model rather than measured, so treat the session count as
+±40%; the first session prints the real rate and re-projects.
 
 **How to run it:**
 
@@ -103,13 +101,16 @@ whole session on inference.
 3. Next session: attach that output and set `RESUME_FROM` to its
    `tree_cot_rt_outputs` path. Cached chains whose prompt still matches are
    reused, so S1-a continues from where it stopped.
-4. Repeat until the coverage line reports all 9,121 typed instances.
+4. Repeat until the coverage line reports all 8,859 typed instances.
 
 Each session reports a projection of how many more are needed.
 
 > Lowering `CHAINS_PER_TYPE` to 1 roughly halves the cost but leaves S1-b and
 > the GRPO selection with a single candidate per typed instance, so invalid
-> chains cannot be filtered out and nothing is actually being selected.
+> chains cannot be filtered out and nothing is actually being selected. The
+> cost here is sessions, not method: cutting K to buy fewer of them trades a
+> hyperparameter the paper fixes for wall-clock, which is the one thing a
+> baseline cannot pay with.
 """)
 
 code(r'''
@@ -149,8 +150,11 @@ SAFETY_MARGIN_MINUTES     = 15
 # one read. So K and M are nearly FREE, and only the sentence count and
 # MAX_NEW_TOKENS actually buy wall-clock time. All three are therefore kept at
 # the paper's values.
-# The bundle already carries the agreed 1,530-sentence training subset and
-# the 1,831-sentence test split, shared byte-for-byte with the S2IT bundle.
+# The bundle already carries the full 8,557-sentence training split and the
+# 1,831-sentence test split, shared byte-for-byte with the S2IT bundle
+# (offline_bundle/subset_ids.json lists the ids). Capping either below is not
+# a cheaper run, it is a different experiment: the two baselines are only
+# comparable while they see the same sentences.
 MAX_TRAIN_RECORDS = None   # use what the bundle contains
 MAX_TEST_RECORDS  = None   # use what the bundle contains
 CHAINS_PER_TYPE   = 10     # = paper K

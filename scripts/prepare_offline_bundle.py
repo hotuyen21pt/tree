@@ -83,12 +83,33 @@ def copy_data(data_dir: Path, bundle: Path) -> dict[str, int]:
                     typed_counts[typed.quad_type] += 1
         shutil.copy2(source, bundle / f"{split}.jsonl")
         print(f"    {split}: {len(records)} records")
-    print(f"    train ASQP types: {dict(sorted(typed_counts.items()))}")
-    (bundle / "dataset_stats.json").write_text(
-        json.dumps({"splits": sizes, "train_quad_types": dict(typed_counts)}, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    print(f"    source train ASQP types: {dict(sorted(typed_counts.items()))}")
     return sizes
+
+
+def write_dataset_stats(bundle: Path) -> None:
+    """Describe what the bundle actually holds, after any id filtering.
+
+    Written here rather than in copy_data: the splits are only final once
+    select_subset has applied the shared id lists, and this file ships inside
+    the archive, where it is read as the record of what was trained on.
+    """
+    sizes: dict[str, int] = {}
+    typed_counts: Counter[str] = Counter()
+    for split in SPLITS:
+        records = read_jsonl(bundle / f"{split}.jsonl")
+        sizes[split] = len(records)
+        if split == "train":
+            for record in records:
+                for typed in typed_instances(record):
+                    typed_counts[typed.quad_type] += 1
+    print(f"    bundled train ASQP types: {dict(sorted(typed_counts.items()))} "
+          f"over {sizes['train']} sentences")
+    payload = json.dumps(
+        {"splits": sizes, "train_quad_types": dict(sorted(typed_counts.items()))},
+        indent=2,
+    )
+    (bundle / "dataset_stats.json").write_text(payload + "\n", encoding="utf-8")
 
 
 def select_subset(
@@ -97,11 +118,14 @@ def select_subset(
     seed: int,
     subset_ids: Path | None,
 ) -> dict[str, list[str]]:
-    """Trim the training split to a fixed, reproducible set of sentences.
+    """Record the exact sentences this bundle holds, trimming them if asked.
 
-    Both baselines must train on exactly the same sentences or their scores
-    cannot be compared, so the chosen ids are written to subset_ids.json and
-    the other repository reads them back with --subset-ids.
+    Both baselines must train and evaluate on exactly the same sentences or
+    their scores cannot be compared, so the ids are written to subset_ids.json
+    and the other repository reads them back with --subset-ids. That is needed
+    even when nothing is sampled: this project's language filter removes
+    records the sibling repository still has, so "all of train" is not the
+    same set on both sides.
     """
     chosen: dict[str, list[str]] = {}
     if subset_ids is not None:
@@ -131,7 +155,17 @@ def select_subset(
         log(f"Sampling {sample_train}/{len(rows)} training sentences (seed {seed}); "
             "dev/test recorded in full for cross-repo alignment")
     else:
-        return chosen
+        # Default: train on everything. Nothing is removed below, but the full
+        # id lists are still written, because that file is what the other
+        # repository is pointed at with --subset-ids and what any third method
+        # must be scored against.
+        wanted = {
+            split: {row.instance_id for row in read_jsonl(bundle / f"{split}.jsonl")}
+            for split in SPLITS
+        }
+        counts = ", ".join(f"{split} {len(wanted[split])}" for split in SPLITS)
+        log(f"Keeping every sentence ({counts}); recording the id lists for "
+            "cross-repo alignment")
 
     for split in SPLITS:
         if split not in wanted:
@@ -243,14 +277,16 @@ def main() -> None:
     cli.add_argument(
         "--sample-train",
         type=int,
-        help="keep only this many training sentences (writes subset_ids.json)",
+        help="train on a random subset of this many sentences instead of the "
+             "whole split; omit it to keep them all (subset_ids.json is "
+             "written either way)",
     )
     cli.add_argument("--sample-seed", type=int, default=444)
     cli.add_argument(
         "--subset-ids",
         type=Path,
         help="reuse the subset_ids.json written by the other repository, so both "
-             "baselines train on identical sentences",
+             "baselines train and evaluate on identical sentences",
     )
     cli.add_argument("--skip-wheels", action="store_true", help="reuse an existing wheelhouse")
     args = cli.parse_args()
@@ -261,6 +297,7 @@ def main() -> None:
 
     sizes = copy_data(args.data_dir, bundle)
     select_subset(bundle, args.sample_train, args.sample_seed, args.subset_ids)
+    write_dataset_stats(bundle)
     if not args.skip_wheels:
         download_wheels(bundle / "wheelhouse")
     copy_project(staging)
